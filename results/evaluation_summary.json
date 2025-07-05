@@ -1,0 +1,76 @@
+{
+    "mean_metrics": {
+        "cai": {
+            "base": 0.7394387189756063,
+            "fine_tuned": 0.7773988266897224,
+            "naive_hfc": 1.0
+        },
+        "tai": {
+            "base": 0.2554038946305578,
+            "fine_tuned": 0.27706909475744623,
+            "naive_hfc": 0.2842507382113359
+        },
+        "dtw_distance": {
+            "base": 37120.368801017205,
+            "fine_tuned": 32337.05658869441,
+            "naive_hfc": 346041.6736618579
+        },
+        "gc_content": {
+            "base": 64.06016523933832,
+            "fine_tuned": 63.999234770969416,
+            "naive_hfc": 83.98123298709645
+        },
+        "restriction_sites": {
+            "base": 0.0,
+            "fine_tuned": 0.0,
+            "naive_hfc": 0.0
+        },
+        "neg_cis_elements": {
+            "base": 0.0,
+            "fine_tuned": 0.0,
+            "naive_hfc": 0.0
+        },
+        "homopolymer_runs": {
+            "base": 0.0,
+            "fine_tuned": 0.0,
+            "naive_hfc": 0.0
+        }
+    },
+    "statistical_tests": {
+        "cai": {
+            "fine_tuned_vs_base": 3.896559845095909e-18,
+            "fine_tuned_vs_naive_hfc": "skipped (zero variance)",
+            "base_vs_naive_hfc": "skipped (zero variance)"
+        },
+        "tai": {
+            "fine_tuned_vs_base": 3.896559845095909e-18,
+            "fine_tuned_vs_naive_hfc": 1.4988931053447025e-05,
+            "base_vs_naive_hfc": 4.670683307897806e-18
+        },
+        "dtw_distance": {
+            "fine_tuned_vs_base": 2.546132669479183e-08,
+            "fine_tuned_vs_naive_hfc": 3.896559845095909e-18,
+            "base_vs_naive_hfc": 3.896559845095909e-18
+        },
+        "gc_content": {
+            "fine_tuned_vs_base": 0.7961897064142702,
+            "fine_tuned_vs_naive_hfc": 3.896559845095909e-18,
+            "base_vs_naive_hfc": 3.896559845095909e-18
+        },
+        "restriction_sites": {
+            "fine_tuned_vs_base": "skipped (zero variance)",
+            "fine_tuned_vs_naive_hfc": "skipped (zero variance)",
+            "base_vs_naive_hfc": "skipped (zero variance)"
+        },
+        "neg_cis_elements": {
+            "fine_tuned_vs_base": "skipped (zero variance)",
+            "fine_tuned_vs_naive_hfc": "skipped (zero variance)",
+            "base_vs_naive_hfc": "skipped (zero variance)"
+        },
+        "homopolymer_runs": {
+            "fine_tuned_vs_base": "skipped (zero variance)",
+            "fine_tuned_vs_naive_hfc": "skipped (zero variance)",
+            "base_vs_naive_hfc": "skipped (zero variance)"
+        }
+    }
+}
