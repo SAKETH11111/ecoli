@@ -127,6 +127,7 @@ venv/
 ENV/
 env.bak/
 venv.bak/
+codon_env/
 
 # Spyder project settings
 .spyderproject
@@ -175,3 +176,7 @@ lightning_logs/
 # PyTorch model weights
 *.pth
 *.pt
+# Large files excluded from Git
+models/ecoli-codon-optimizer/finetune.ckpt
+models/ecoli-codon-optimizer/finetune_best.ckpt
+data/ecoli_processed_genes.csv

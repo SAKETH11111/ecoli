@@ -181,7 +181,7 @@ def predict_dna_sequence(
 
     # Load model
     if not isinstance(model, torch.nn.Module):
-        model = load_model(model, device=device, attention_type=attention_type)
+        model = load_model(model_path=model, device=device, attention_type=attention_type)
     else:
         model.eval()
         model.bert.set_attention_type(attention_type)
@@ -211,6 +211,10 @@ def predict_dna_sequence(
             possible_tokens_per_position = [
                 AMINO_ACID_TO_INDEX[token[0]] for token in merged_seq.split(" ")
             ]
+            seq_len = logits.shape[1]
+            if len(possible_tokens_per_position) > seq_len:
+                possible_tokens_per_position = possible_tokens_per_position[:seq_len]
+
             mask = torch.full_like(logits, float("-inf"))
 
             for pos, possible_tokens in enumerate(possible_tokens_per_position):
@@ -334,16 +338,19 @@ def load_model(
     if not model_path:
         warnings.warn("Model path not provided. Loading from HuggingFace.", UserWarning)
         model = BigBirdForMaskedLM.from_pretrained("adibvafa/CodonTransformer")
-
     elif model_path.endswith(".ckpt"):
-        checkpoint = torch.load(model_path)
-        state_dict = checkpoint["state_dict"]
+        checkpoint = torch.load(model_path, map_location="cpu")
 
-        # Remove the "model." prefix from the keys
-        if remove_prefix:
-            state_dict = {
-                key.replace("model.", ""): value for key, value in state_dict.items()
-            }
+        # Detect Lightning checkpoint vs raw state dict
+        if isinstance(checkpoint, dict) and "state_dict" in checkpoint:
+            state_dict = checkpoint["state_dict"]
+            if remove_prefix:
+                state_dict = {
+                    k.replace("model.", ""): v for k, v in state_dict.items()
+                }
+        else:
+            # assume checkpoint itself is state_dict
+            state_dict = checkpoint
 
         if num_organisms is None:
             num_organisms = NUM_ORGANISMS
@@ -351,13 +358,13 @@ def load_model(
         # Load model configuration and instantiate the model
         config = load_bigbird_config(num_organisms)
         model = BigBirdForMaskedLM(config=config)
-        model.load_state_dict(state_dict)
+        model.load_state_dict(state_dict, strict=False)
 
     elif model_path.endswith(".pt"):
         state_dict = torch.load(model_path)
         config = state_dict.pop("self.config")
         model = BigBirdForMaskedLM(config=config)
-        model.load_state_dict(state_dict)
+        model.load_state_dict(state_dict, strict=False)
 
     else:
         raise ValueError(

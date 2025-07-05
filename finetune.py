@@ -17,7 +17,10 @@ import torch
 from torch.utils.data import DataLoader
 from transformers import AutoTokenizer, BigBirdForMaskedLM
 
+import torch.nn.functional as F
 from CodonTransformer.CodonUtils import (
+    C_indices,
+    G_indices,
     MAX_LEN,
     TOKEN2MASK,
     IterableJSONData,
@@ -54,7 +57,7 @@ class MaskedTokenizerCollator:
         replaced = torch.bernoulli(torch.full(selected.shape, 0.8)).bool() & selected
         inputs[replaced] = torch.tensor(
             list((map(TOKEN2MASK.__getitem__, inputs[replaced].numpy())))
-        )
+        ).long()
 
         # 10% of the time, we replace masked input tokens with random vector.
         randomized = (
@@ -72,11 +75,13 @@ class MaskedTokenizerCollator:
 
 
 class plTrainHarness(pl.LightningModule):
-    def __init__(self, model, learning_rate, warmup_fraction):
+    def __init__(self, model, learning_rate, warmup_fraction, gc_penalty_weight, tokenizer):
         super().__init__()
         self.model = model
         self.learning_rate = learning_rate
         self.warmup_fraction = warmup_fraction
+        self.gc_penalty_weight = gc_penalty_weight
+        self.tokenizer = tokenizer
 
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(
@@ -87,7 +92,7 @@ class plTrainHarness(pl.LightningModule):
             "scheduler": torch.optim.lr_scheduler.OneCycleLR(
                 optimizer,
                 max_lr=self.learning_rate,
-                total_steps=self.trainer.estimated_stepping_batches,
+                total_steps=int(self.trainer.estimated_stepping_batches),
                 pct_start=self.warmup_fraction,
             ),
             "interval": "step",
@@ -98,26 +103,64 @@ class plTrainHarness(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         self.model.bert.set_attention_type("block_sparse")
         outputs = self.model(**batch)
+        mlm_loss = outputs.loss
+
+        # Differentiable GC Content Penalty with Sliding Window
+        gc_loss = 0
+        if self.gc_penalty_weight > 0:
+            logits = outputs.logits
+            probs = torch.softmax(logits, dim=-1)
+
+            # Get probabilities of G and C containing codons
+            g_probs = probs[..., G_indices].sum(dim=-1)
+            c_probs = probs[..., C_indices].sum(dim=-1)
+            gc_prob = g_probs + c_probs
+
+            # Apply sliding window with convolution
+            # Unsqueeze to add channel dimension for conv1d
+            gc_prob_unsqueezed = gc_prob.unsqueeze(1)
+            # Create a sliding window of size 50
+            window_size = 50
+            # Create a weight for the convolution
+            conv_weight = torch.ones(1, 1, window_size, device=self.device) / window_size
+            # Apply convolution
+            gc_window = F.conv1d(gc_prob_unsqueezed, conv_weight, padding="same").squeeze(1)
+
+            # Calculate deviation from target range (45-60%)
+            # Only penalize if outside the 7.5% margin from the 52.5% center
+            gc_dev = F.relu(torch.abs(gc_window - 0.525) - 0.075)
+            
+            # Mask out padding positions
+            active_positions = batch["labels"] != -100
+            gc_dev_active = gc_dev[active_positions]
+
+            if gc_dev_active.numel() > 0:
+                gc_loss = gc_dev_active.mean()
+                self.log("gc_loss", gc_loss, on_step=True, prog_bar=True)
+                self.log("mean_gc_window", gc_window[active_positions].mean(), on_step=True, prog_bar=True)
+
+        total_loss = mlm_loss + self.gc_penalty_weight * gc_loss
         self.log_dict(
             dictionary={
-                "loss": outputs.loss,
+                "loss": total_loss,
+                "mlm_loss": mlm_loss,
                 "lr": self.trainer.optimizers[0].param_groups[0]["lr"],
             },
             on_step=True,
             prog_bar=True,
         )
-        return outputs.loss
+        return total_loss
 
 
-class DumpStateDict(pl.callbacks.ModelCheckpoint):
+class DumpStateDict(pl.Callback):
     def __init__(self, checkpoint_dir, checkpoint_filename, every_n_train_steps):
-        super().__init__(
-            dirpath=checkpoint_dir, every_n_train_steps=every_n_train_steps
-        )
+        super().__init__()
+        self.dirpath = checkpoint_dir
+        self.every_n_train_steps = every_n_train_steps
         self.checkpoint_filename = checkpoint_filename
 
     def on_save_checkpoint(self, trainer, pl_module, checkpoint):
-        model = trainer.model.model
+        model = pl_module.model
         torch.save(
             model.state_dict(), os.path.join(self.dirpath, self.checkpoint_filename)
         )
@@ -131,7 +174,9 @@ def main(args):
     # Load the tokenizer and model
     tokenizer = AutoTokenizer.from_pretrained("adibvafa/CodonTransformer")
     model = BigBirdForMaskedLM.from_pretrained("adibvafa/CodonTransformer-base")
-    harnessed_model = plTrainHarness(model, args.learning_rate, args.warmup_fraction)
+    harnessed_model = plTrainHarness(
+        model, args.learning_rate, args.warmup_fraction, args.gc_penalty_weight, tokenizer
+    )
 
     # Load the training data
     train_data = IterableJSONData(args.dataset_dir, dist_env="slurm")
@@ -226,5 +271,11 @@ if __name__ == "__main__":
         "--seed", type=int, default=123, help="Random seed for reproducibility"
     )
     parser.add_argument("--debug", action="store_true", help="Enable debug mode")
+    parser.add_argument(
+        "--gc_penalty_weight",
+        type=float,
+        default=0.0,
+        help="Weight for the GC content penalty in the loss function",
+    )
     args = parser.parse_args()
     main(args)

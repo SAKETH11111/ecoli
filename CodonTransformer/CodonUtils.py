@@ -5,6 +5,7 @@ Includes constants and helper functions used by other Python scripts.
 """
 
 import itertools
+import json
 import os
 import pickle
 import re
@@ -151,6 +152,23 @@ TOKEN2INDEX: Dict[str, int] = {
 
 # Index-to-token mapping, reverse of TOKEN2INDEX
 INDEX2TOKEN: Dict[int, str] = {i: c for c, i in TOKEN2INDEX.items()}
+
+# Dictionary mapping each codon to its GC content
+CODON_GC_CONTENT: Dict[str, int] = {
+    token.split("_")[1]: token.split("_")[1].count("G") + token.split("_")[1].count("C")
+    for token in TOKEN2INDEX
+    if "_" in token and len(token.split("_")[1]) == 3
+}
+
+# Tensor with GC counts for each token in the vocabulary
+GC_COUNTS_PER_TOKEN = torch.zeros(len(TOKEN2INDEX))
+for token, index in TOKEN2INDEX.items():
+    if "_" in token and len(token.split("_")[1]) == 3:
+        codon = token.split("_")[1]
+        GC_COUNTS_PER_TOKEN[index] = CODON_GC_CONTENT[codon]
+
+G_indices = [idx for token, idx in TOKEN2INDEX.items() if "g" in token.split("_")[-1]]
+C_indices = [idx for token, idx in TOKEN2INDEX.items() if "c" in token.split("_")[-1]]
 
 # Dictionary mapping each amino acid and stop symbol to indices of codon tokens that translate to it
 AMINO_ACID_TO_INDEX = {
@@ -505,9 +523,12 @@ class IterableData(torch.utils.data.IterableDataset):
 
     def __init__(self, dist_env: Optional[str] = None):
         super().__init__()
-        self.world_size_handle, self.rank_handle = {
-            "slurm": ("SLURM_NTASKS", "SLURM_PROCID")
-        }.get(dist_env, ("WORLD_SIZE", "LOCAL_RANK"))
+        if dist_env is None:
+            self.world_size_handle, self.rank_handle = ("WORLD_SIZE", "LOCAL_RANK")
+        else:
+            self.world_size_handle, self.rank_handle = {
+                "slurm": ("SLURM_NTASKS", "SLURM_PROCID")
+            }.get(dist_env, ("WORLD_SIZE", "LOCAL_RANK"))
 
     @property
     def iterator(self) -> Iterator:
@@ -528,8 +549,8 @@ class IterableData(torch.utils.data.IterableDataset):
         # In multi-processing context, use 'os.environ' to
         # find global worker rank. Then use 'islice' to allocate
         # the items of the stream to the workers.
-        world_size = int(os.environ.get(self.world_size_handle))
-        global_rank = int(os.environ.get(self.rank_handle))
+        world_size = int(os.environ.get(self.world_size_handle, "1"))
+        global_rank = int(os.environ.get(self.rank_handle, "0"))
         local_rank = worker_info.id
         local_num_workers = worker_info.num_workers
 
@@ -553,12 +574,24 @@ class IterableJSONData(IterableData):
         super().__init__(**kwargs)
         self.data_path = data_path
         self.train = train
+        with open(os.path.join(self.data_path, "finetune_set.json"), "r") as f:
+            self.records = [json.loads(line) for line in f]
+
+    def __len__(self):
+        return len(self.records)
+
+    @property
+    def iterator(self) -> Iterator:
+        """Define the stream logic for the dataset."""
+        for record in self.records:
+            yield record
 
 
 class ConfigManager(ABC):
     """
     Abstract base class for managing configuration settings.
     """
+    _config: Dict[str, Any]
 
     def __enter__(self):
         return self

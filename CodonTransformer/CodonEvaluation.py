@@ -64,19 +64,19 @@ def get_organism_to_CSI_weights(
     return organism2weights
 
 
-def get_GC_content(dna: str, lower: bool = False) -> float:
+def get_GC_content(dna: str) -> float:
     """
     Calculate the GC content of a DNA sequence.
 
     Args:
         dna (str): The DNA sequence.
-        lower (bool): If True, converts DNA sequence to lowercase before calculation.
 
     Returns:
         float: The GC content as a percentage.
     """
-    if lower:
-        dna = dna.lower()
+    dna = dna.upper()
+    if not dna:
+        return 0.0
     return (dna.count("G") + dna.count("C")) / len(dna) * 100
 
 
@@ -276,3 +276,128 @@ def get_sequence_similarity(
                 identity += 1
 
     return (identity / (len(predicted) / window_length)) * 100
+
+
+def scan_for_restriction_sites(seq: str, sites: List[str] = ['GAATTC', 'GGATCC', 'AAGCTT']) -> int:
+    """
+    Scans for a list of restriction enzyme sites in a DNA sequence.
+    """
+    return sum(seq.upper().count(site.upper()) for site in sites)
+
+
+def count_negative_cis_elements(seq: str, motifs: List[str] = ['TATAAT', 'TTGACA', 'AGCTAGT']) -> int:
+    """
+    Counts occurrences of negative cis-regulatory elements in a DNA sequence.
+    """
+    return sum(seq.upper().count(m.upper()) for m in motifs)
+
+
+def calculate_homopolymer_runs(seq: str, max_len: int = 8) -> int:
+    """
+    Calculates the number of homopolymer runs longer than a given length.
+    """
+    import re
+    min_len = max_len + 1
+    return len(re.findall(r'(A{%d,}|T{%d,}|G{%d,}|C{%d,})' % (min_len, min_len, min_len, min_len), seq.upper()))
+
+
+def get_min_max_profile(
+    dna: str,
+    codon_frequencies: Dict[str, Tuple[List[str], List[float]]],
+    window_size: int = 18,
+) -> List[float]:
+    """
+    Calculate the %MinMax profile for a DNA sequence. This is a list of
+    %MinMax values for sliding windows across the sequence.
+
+    Args:
+        dna (str): The DNA sequence.
+        codon_frequencies (Dict[str, Tuple[List[str], List[float]]]): Codon
+            frequency distribution per amino acid.
+        window_size (int): Size of the window to calculate %MinMax.
+
+    Returns:
+        List[float]: List of %MinMax values for the sequence.
+    """
+    return get_min_max_percentage(dna, codon_frequencies, window_size)
+
+
+def calculate_dtw_distance(profile1: List[float], profile2: List[float]) -> float:
+    """
+    Calculates the Dynamic Time Warping (DTW) distance between two profiles.
+
+    Args:
+        profile1 (List[float]): The first profile (e.g., %MinMax of generated sequence).
+        profile2 (List[float]): The second profile (e.g., %MinMax of natural sequence).
+
+    Returns:
+        float: The DTW distance between the two profiles.
+    """
+    from dtw import dtw
+    import numpy as np
+
+    # Ensure profiles are numpy arrays and handle potential None and NaN values
+    p1 = np.array([v for v in profile1 if v is not None and not np.isnan(v)]).reshape(
+        -1, 1
+    )
+    p2 = np.array([v for v in profile2 if v is not None and not np.isnan(v)]).reshape(
+        -1, 1
+    )
+
+    if len(p1) == 0 or len(p2) == 0:
+        return np.inf  # Return infinity if one of the profiles is empty
+
+    alignment = dtw(p1, p2, keep_internals=True)
+    return alignment.distance  # type: ignore
+
+
+def get_ecoli_tai_weights():
+    """
+    Returns a dictionary of tAI weights for E. coli based on tRNA gene copy numbers.
+    These weights are pre-calculated based on the relative adaptiveness of each codon.
+    """
+    codons = [
+        "TTT", "TTC", "TTA", "TTG", "TCT", "TCC", "TCA", "TCG", "TAT", "TAC",
+        "TGT", "TGC", "TGG", "CTT", "CTC", "CTA", "CTG", "CCT", "CCC", "CCA",
+        "CCG", "CAT", "CAC", "CAA", "CAG", "CGT", "CGC", "CGA", "CGG", "ATT",
+        "ATC", "ATA", "ACT", "ACC", "ACA", "ACG", "AAT", "AAC", "AAA", "AAG",
+        "AGT", "AGC", "AGA", "AGG", "GTT", "GTC", "GTA", "GTG", "GCT", "GCC",
+        "GCA", "GCG", "GAT", "GAC", "GAA", "GAG", "GGT", "GGC", "GGA", "GGG"
+    ]
+    weights = [
+        0.1966667, 0.3333333, 0.1666667, 0.2200000, 0.1966667, 0.3333333,
+        0.1666667, 0.2200000, 0.2950000, 0.5000000, 0.09833333, 0.1666667,
+        0.2200000, 0.09833333, 0.1666667, 0.1666667, 0.7200000, 0.09833333,
+        0.1666667, 0.1666667, 0.2200000, 0.09833333, 0.1666667, 0.3333333,
+        0.4400000, 0.6666667, 0.4800000, 0.00006666667, 0.1666667, 0.2950000,
+        0.5000000, 0.01833333, 0.1966667, 0.3333333, 0.1666667, 0.3866667,
+        0.3933333, 0.6666667, 1.0000000, 0.3200000, 0.09833333, 0.1666667,
+        0.1666667, 0.2200000, 0.1966667, 0.3333333, 0.8333333, 0.2666667,
+        0.1966667, 0.3333333, 0.5000000, 0.1600000, 0.2950000, 0.5000000,
+        0.6666667, 0.2133333, 0.3933333, 0.6666667, 0.1666667, 0.2200000
+    ]
+    return dict(zip(codons, weights))
+
+
+def calculate_tAI(sequence: str, tai_weights: Dict[str, float]) -> float:
+    """
+    Calculates the tRNA Adaptation Index (tAI) for a given DNA sequence.
+
+    Args:
+        sequence (str): The DNA sequence to analyze.
+        tai_weights (Dict[str, float]): A dictionary of tAI weights for each codon.
+
+    Returns:
+        float: The tAI value for the sequence.
+    """
+    from scipy.stats.mstats import gmean
+    
+    codons = [sequence[i:i+3] for i in range(0, len(sequence), 3)]
+    
+    # Filter out stop codons and codons not in weights
+    weights = [tai_weights[codon] for codon in codons if codon in tai_weights and tai_weights[codon] > 0]
+    
+    if not weights:
+        return 0.0
+        
+    return gmean(weights)
