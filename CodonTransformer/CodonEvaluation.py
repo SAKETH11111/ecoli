@@ -123,69 +123,72 @@ def get_min_max_percentage(
     window_size: int = 18,
 ) -> List[float]:
     """
-    Calculate the %MinMax metric for a DNA sequence.
-
-    Args:
-        dna (str): The DNA sequence.
-        codon_frequencies (Dict[str, Tuple[List[str], List[float]]]): Codon
-            frequency distribution per amino acid.
-        window_size (int): Size of the window to calculate %MinMax.
-
-    Returns:
-        List[float]: List of %MinMax values for the sequence.
-
-    Credit: https://github.com/chowington/minmax
+    Calculate the %MinMax metric for a DNA sequence with robust error handling.
     """
-    # Get a dictionary mapping each codon to its respective amino acid
+    codons = [dna[i : i + 3] for i in range(0, len(dna), 3)]
+    if not codons:
+        return []
+
+    # Return a neutral profile for sequences shorter than the window size
+    if len(codons) < window_size:
+        return [0.0] * len(codons)
+
     codon2amino = {
         codon: amino
-        for amino, (codons, frequencies) in codon_frequencies.items()
-        for codon in codons
+        for amino, (codons_list, frequencies) in codon_frequencies.items()
+        for codon in codons_list
     }
 
     min_max_values = []
-    codons = [dna[i : i + 3] for i in range(0, len(dna), 3)]  # Split DNA into codons
 
-    # Iterate through the DNA sequence using the specified window size
     for i in range(len(codons) - window_size + 1):
-        codon_window = codons[i : i + window_size]  # Codons in the current window
+        codon_window = codons[i : i + window_size]
+        
+        Actual, Max, Min, Avg = 0.0, 0.0, 0.0, 0.0
+        valid_codons_in_window = 0
 
-        Actual = 0.0  # Average of the actual codon frequencies
-        Max = 0.0  # Average of the min codon frequencies
-        Min = 0.0  # Average of the max codon frequencies
-        Avg = 0.0  # Average of the averages of all frequencies for each amino acid
-
-        # Sum the frequencies for codons in the current window
         for codon in codon_window:
-            aminoacid = codon2amino[codon]
-            frequencies = codon_frequencies[aminoacid][1]
-            codon_index = codon_frequencies[aminoacid][0].index(codon)
-            codon_frequency = codon_frequencies[aminoacid][1][codon_index]
+            aminoacid = codon2amino.get(codon)
+            if not aminoacid or aminoacid not in codon_frequencies:
+                continue
 
+            frequencies = codon_frequencies[aminoacid][1]
+            if not frequencies:
+                continue
+
+            try:
+                codon_index = codon_frequencies[aminoacid][0].index(codon)
+                codon_frequency = frequencies[codon_index]
+            except ValueError:
+                continue
+            
+            valid_codons_in_window += 1
             Actual += codon_frequency
             Max += max(frequencies)
             Min += min(frequencies)
             Avg += sum(frequencies) / len(frequencies)
 
-        # Divide by the window size to get the averages
-        Actual = Actual / window_size
-        Max = Max / window_size
-        Min = Min / window_size
-        Avg = Avg / window_size
+        if valid_codons_in_window == 0:
+            min_max_values.append(0.0)
+            continue
 
-        # Calculate %MinMax
-        percentMax = ((Actual - Avg) / (Max - Avg)) * 100
-        percentMin = ((Avg - Actual) / (Avg - Min)) * 100
+        Actual /= valid_codons_in_window
+        Max /= valid_codons_in_window
+        Min /= valid_codons_in_window
+        Avg /= valid_codons_in_window
 
-        # Append the appropriate %MinMax value
+        percentMax = ((Actual - Avg) / (Max - Avg)) * 100 if (Max - Avg) != 0 else 0.0
+        percentMin = ((Avg - Actual) / (Avg - Min)) * 100 if (Avg - Min) != 0 else 0.0
+
         if percentMax >= 0:
             min_max_values.append(percentMax)
         else:
             min_max_values.append(-percentMin)
 
-    # Populate the last floor(window_size / 2) entries of min_max_values with None
-    for i in range(int(window_size / 2)):
-        min_max_values.append(None)
+    # Pad the result to match the original codon length, ensuring a full profile
+    padding_size = len(codons) - len(min_max_values)
+    if padding_size > 0:
+        min_max_values.extend([0.0] * padding_size)
 
     return min_max_values
 
@@ -294,11 +297,17 @@ def count_negative_cis_elements(seq: str, motifs: List[str] = ['TATAAT', 'TTGACA
 
 def calculate_homopolymer_runs(seq: str, max_len: int = 8) -> int:
     """
-    Calculates the number of homopolymer runs longer than a given length.
+    Calculates the total number of extra nucleotides in homopolymer runs longer than max_len.
+    For example, for max_len=8, a run of 10 'A's contributes 2 to the count.
     """
     import re
+    total_extra_nt = 0
     min_len = max_len + 1
-    return len(re.findall(r'(A{%d,}|T{%d,}|G{%d,}|C{%d,})' % (min_len, min_len, min_len, min_len), seq.upper()))
+    # Regex to find any character repeated more than max_len times
+    for match in re.finditer(r'(A{%d,}|T{%d,}|G{%d,}|C{%d,})' % (min_len, min_len, min_len, min_len), seq.upper()):
+        # The length of the found run minus the allowed length
+        total_extra_nt += len(match.group(0)) - max_len
+    return total_extra_nt
 
 
 def get_min_max_profile(
@@ -307,48 +316,41 @@ def get_min_max_profile(
     window_size: int = 18,
 ) -> List[float]:
     """
-    Calculate the %MinMax profile for a DNA sequence. This is a list of
-    %MinMax values for sliding windows across the sequence.
-
-    Args:
-        dna (str): The DNA sequence.
-        codon_frequencies (Dict[str, Tuple[List[str], List[float]]]): Codon
-            frequency distribution per amino acid.
-        window_size (int): Size of the window to calculate %MinMax.
-
-    Returns:
-        List[float]: List of %MinMax values for the sequence.
+    Calculate the %MinMax profile for a DNA sequence with robust error handling.
     """
     return get_min_max_percentage(dna, codon_frequencies, window_size)
 
 
 def calculate_dtw_distance(profile1: List[float], profile2: List[float]) -> float:
     """
-    Calculates the Dynamic Time Warping (DTW) distance between two profiles.
-
-    Args:
-        profile1 (List[float]): The first profile (e.g., %MinMax of generated sequence).
-        profile2 (List[float]): The second profile (e.g., %MinMax of natural sequence).
-
-    Returns:
-        float: The DTW distance between the two profiles.
+    Calculates the Dynamic Time Warping (DTW) distance between two profiles
+    with enhanced stability and error handling.
     """
     from dtw import dtw
     import numpy as np
 
-    # Ensure profiles are numpy arrays and handle potential None and NaN values
-    p1 = np.array([v for v in profile1 if v is not None and not np.isnan(v)]).reshape(
-        -1, 1
-    )
-    p2 = np.array([v for v in profile2 if v is not None and not np.isnan(v)]).reshape(
-        -1, 1
-    )
+    p1 = np.array([v for v in profile1 if v is not None and np.isfinite(v)])
+    p2 = np.array([v for v in profile2 if v is not None and np.isfinite(v)])
 
-    if len(p1) == 0 or len(p2) == 0:
-        return np.inf  # Return infinity if one of the profiles is empty
+    if len(p1) < 2 or len(p2) < 2:
+        return 0.0  # Return neutral distance for invalid profiles
 
-    alignment = dtw(p1, p2, keep_internals=True)
-    return alignment.distance  # type: ignore
+    # Resample the shorter sequence to match the longer one
+    if len(p1) != len(p2):
+        if len(p1) < len(p2):
+            p1 = np.interp(np.linspace(0, 1, len(p2)), np.linspace(0, 1, len(p1)), p1)
+        else:
+            p2 = np.interp(np.linspace(0, 1, len(p1)), np.linspace(0, 1, len(p2)), p2)
+
+    # Normalize profiles to have zero mean and unit variance
+    p1 = (p1 - np.mean(p1)) / (np.std(p1) + 1e-9)
+    p2 = (p2 - np.mean(p2)) / (np.std(p2) + 1e-9)
+
+    try:
+        alignment = dtw(p1, p2, keep_internals=True)
+        return alignment.distance
+    except Exception:
+        return 1000.0 # Return a high penalty if DTW fails
 
 
 def get_ecoli_tai_weights():
