@@ -15,7 +15,7 @@ import os
 import pytorch_lightning as pl
 import torch
 from torch.utils.data import DataLoader
-from transformers import AutoTokenizer, BigBirdForMaskedLM
+from transformers import AutoTokenizer, BigBirdForMaskedLM, logging as hf_logging
 
 import torch.nn.functional as F
 from CodonTransformer.CodonUtils import (
@@ -26,6 +26,8 @@ from CodonTransformer.CodonUtils import (
     IterableJSONData,
 )
 
+# Suppress excessive INFO logs from transformers (e.g., BigBird attention fall-backs)
+hf_logging.set_verbosity_warning()
 
 class MaskedTokenizerCollator:
     def __init__(self, tokenizer):
@@ -75,13 +77,59 @@ class MaskedTokenizerCollator:
 
 
 class plTrainHarness(pl.LightningModule):
-    def __init__(self, model, learning_rate, warmup_fraction, gc_penalty_weight, tokenizer):
+    def __init__(self, model, learning_rate, warmup_fraction, gc_penalty_weight, tokenizer, 
+                 gc_target=0.52, use_lagrangian=False, lagrangian_rho=10.0, curriculum_epochs=3):
         super().__init__()
         self.model = model
         self.learning_rate = learning_rate
         self.warmup_fraction = warmup_fraction
         self.gc_penalty_weight = gc_penalty_weight
         self.tokenizer = tokenizer
+        
+        # Augmented-Lagrangian GC Control parameters
+        self.gc_target = gc_target
+        self.use_lagrangian = use_lagrangian
+        self.lagrangian_rho = lagrangian_rho
+        self.curriculum_epochs = curriculum_epochs
+        
+        # Initialize Lagrangian multiplier as buffer (persists across checkpoints)
+        self.register_buffer("lambda_gc", torch.tensor(0.0))
+        
+        # Step counter for periodic lambda updates
+        self.register_buffer("step_counter", torch.tensor(0))
+        
+        # Configure BigBird to use sparse attention (set once to avoid per-step prints)
+        if hasattr(self.model, 'bert') and hasattr(self.model.bert, 'set_attention_type'):
+            try:
+                self.model.bert.set_attention_type("block_sparse")
+            except Exception:
+                # Fallback silently if method missing (future-proof)
+                pass
+        
+        # Create GC lookup table for codons
+        self._create_gc_lookup_table()
+
+    def _create_gc_lookup_table(self):
+        """Create a lookup tensor that maps each token index to its GC content fraction."""
+        from CodonTransformer.CodonUtils import TOKEN2INDEX
+        
+        # Initialize GC lookup tensor for all tokens
+        vocab_size = len(TOKEN2INDEX)
+        gc_lookup = torch.zeros(vocab_size)
+        
+        # Calculate GC content for each codon token
+        for token, idx in TOKEN2INDEX.items():
+            if "_" in token and len(token.split("_")) == 2:
+                # Extract codon sequence (e.g., "k_aaa" -> "aaa")
+                codon = token.split("_")[-1].upper()
+                if len(codon) == 3:  # Valid codon
+                    # Count G and C nucleotides
+                    gc_count = codon.count('G') + codon.count('C')
+                    gc_content = gc_count / 3.0  # Fraction of GC content
+                    gc_lookup[idx] = gc_content
+        
+        # Register as buffer so it moves with the model to GPU
+        self.register_buffer("gc_lookup_tensor", gc_lookup)
 
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(
@@ -101,45 +149,72 @@ class plTrainHarness(pl.LightningModule):
         return [optimizer], [lr_scheduler]
 
     def training_step(self, batch, batch_idx):
-        self.model.bert.set_attention_type("block_sparse")
+        # Forward pass
         outputs = self.model(**batch)
         mlm_loss = outputs.loss
 
-        # Differentiable GC Content Penalty with Sliding Window
+        # Increment step counter
+        self.step_counter += 1
+        
+        # Augmented-Lagrangian GC Control
         gc_loss = 0
-        if self.gc_penalty_weight > 0:
+        if self.use_lagrangian or self.gc_penalty_weight > 0:
             logits = outputs.logits
             probs = torch.softmax(logits, dim=-1)
-
-            # Get probabilities of G and C containing codons
-            g_probs = probs[..., G_indices].sum(dim=-1)
-            c_probs = probs[..., C_indices].sum(dim=-1)
-            gc_prob = g_probs + c_probs
-
-            # Apply sliding window with convolution
-            # Unsqueeze to add channel dimension for conv1d
-            gc_prob_unsqueezed = gc_prob.unsqueeze(1)
-            # Create a sliding window of size 50
+            
+            # Calculate expected GC content per position using differentiable approach
+            # g_i = Σ_j P_ij · gc(j) where gc(j) is GC content of codon j
+            expected_gc = torch.matmul(probs, self.gc_lookup_tensor)
+            
+            # Apply 1D convolution with uniform kernel size 50 for local GC smoothing
             window_size = 50
-            # Create a weight for the convolution
+            expected_gc_unsqueezed = expected_gc.unsqueeze(1)  # Add channel dimension
             conv_weight = torch.ones(1, 1, window_size, device=self.device) / window_size
-            # Apply convolution
-            gc_window = F.conv1d(gc_prob_unsqueezed, conv_weight, padding="same").squeeze(1)
-
-            # Calculate deviation from target range (45-60%)
-            # Only penalize if outside the 7.5% margin from the 52.5% center
-            gc_dev = F.relu(torch.abs(gc_window - 0.525) - 0.075)
+            gc_window = F.conv1d(expected_gc_unsqueezed, conv_weight, padding="same").squeeze(1)
             
             # Mask out padding positions
             active_positions = batch["labels"] != -100
-            gc_dev_active = gc_dev[active_positions]
-
-            if gc_dev_active.numel() > 0:
-                gc_loss = gc_dev_active.mean()
-                self.log("gc_loss", gc_loss, on_step=True, prog_bar=True)
-                self.log("mean_gc_window", gc_window[active_positions].mean(), on_step=True, prog_bar=True)
-
-        total_loss = mlm_loss + self.gc_penalty_weight * gc_loss
+            gc_window_active = gc_window[active_positions]
+            
+            if gc_window_active.numel() > 0:
+                mean_gc = gc_window_active.mean()
+                
+                # Log current GC content
+                self.log("mean_gc_window", mean_gc, on_step=True, prog_bar=True)
+                
+                # Apply curriculum learning - only enforce GC constraint after warm-up
+                current_epoch = self.current_epoch
+                if current_epoch >= self.curriculum_epochs:
+                    
+                    if self.use_lagrangian:
+                        # Augmented-Lagrangian approach
+                        gc_deviation = mean_gc - self.gc_target
+                        
+                        # Update lambda every 20 steps
+                        if self.step_counter % 20 == 0:
+                            self.lambda_gc = self.lambda_gc + self.lagrangian_rho * gc_deviation.detach()
+                            
+                        # Augmented-Lagrangian loss: λ·(mean_gc - μ) + (ρ/2)(mean_gc - μ)²
+                        lagrangian_term = self.lambda_gc * gc_deviation
+                        penalty_term = (self.lagrangian_rho / 2) * (gc_deviation ** 2)
+                        gc_loss = lagrangian_term + penalty_term
+                        
+                        self.log("lambda_gc", self.lambda_gc, on_step=True, prog_bar=True)
+                        self.log("gc_deviation", gc_deviation, on_step=True, prog_bar=True)
+                        
+                    else:
+                        # Fallback to old penalty approach if not using Lagrangian
+                        gc_dev = F.relu(torch.abs(mean_gc - self.gc_target) - 0.02)  # 2% tolerance
+                        gc_loss = gc_dev
+                        
+                    self.log("gc_loss", gc_loss, on_step=True, prog_bar=True)
+        
+        # Combine losses
+        if self.use_lagrangian:
+            total_loss = mlm_loss + gc_loss
+        else:
+            total_loss = mlm_loss + self.gc_penalty_weight * gc_loss
+            
         self.log_dict(
             dictionary={
                 "loss": total_loss,
@@ -166,6 +241,47 @@ class DumpStateDict(pl.Callback):
         )
 
 
+class GCValidationHook(pl.Callback):
+    """Validation hook to monitor GC content during training."""
+    
+    def __init__(self, gc_target=0.52, tolerance=0.02):
+        super().__init__()
+        self.gc_target = gc_target
+        self.tolerance = tolerance
+        self.gc_target_min = gc_target - tolerance
+        self.gc_target_max = gc_target + tolerance
+        
+    def on_train_epoch_end(self, trainer, pl_module):
+        """Check GC content at the end of each epoch."""
+        if hasattr(pl_module, 'use_lagrangian') and pl_module.use_lagrangian:
+            current_epoch = trainer.current_epoch
+            
+            # Only validate after curriculum warm-up period
+            if current_epoch >= pl_module.curriculum_epochs:
+                # Get the logged mean GC content from the last step
+                if 'mean_gc_window' in trainer.logged_metrics:
+                    current_gc = trainer.logged_metrics.get('mean_gc_window', None)
+                    
+                    if current_gc is not None:
+                        current_gc_val = float(current_gc)
+                        
+                        # Log validation status
+                        within_target = self.gc_target_min <= current_gc_val <= self.gc_target_max
+                        
+                        if within_target:
+                            print(f"✅ Epoch {current_epoch}: GC content {current_gc_val:.3f} is within target range [{self.gc_target_min:.3f}, {self.gc_target_max:.3f}]")
+                        else:
+                            print(f"⚠️  Epoch {current_epoch}: GC content {current_gc_val:.3f} is outside target range [{self.gc_target_min:.3f}, {self.gc_target_max:.3f}]")
+                            
+                        # Log lambda value if available
+                        if 'lambda_gc' in trainer.logged_metrics:
+                            lambda_val = float(trainer.logged_metrics.get('lambda_gc', 0))
+                            print(f"   Lambda: {lambda_val:.4f}")
+                            
+                        # Assert for development - comment out in production
+                        # assert within_target, f"GC content {current_gc_val:.3f} outside acceptable range after curriculum warm-up"
+
+
 def main(args):
     """Finetune the CodonTransformer model."""
     pl.seed_everything(args.seed)
@@ -175,7 +291,9 @@ def main(args):
     tokenizer = AutoTokenizer.from_pretrained("adibvafa/CodonTransformer")
     model = BigBirdForMaskedLM.from_pretrained("adibvafa/CodonTransformer-base")
     harnessed_model = plTrainHarness(
-        model, args.learning_rate, args.warmup_fraction, args.gc_penalty_weight, tokenizer
+        model, args.learning_rate, args.warmup_fraction, args.gc_penalty_weight, tokenizer,
+        gc_target=args.gc_target, use_lagrangian=args.use_lagrangian, 
+        lagrangian_rho=args.lagrangian_rho, curriculum_epochs=args.curriculum_epochs
     )
 
     # Load the training data
@@ -194,17 +312,33 @@ def main(args):
         checkpoint_filename=args.checkpoint_filename,
         every_n_train_steps=args.save_every_n_steps,
     )
+    gc_validation = GCValidationHook(
+        gc_target=args.gc_target,
+        tolerance=0.02  # 2% tolerance around target
+    )
+    callbacks = [save_checkpoint, gc_validation]
+    
+    # Determine accelerator and device configuration dynamically
+    if args.num_gpus > 0:
+        accelerator = "gpu"
+        devices = args.num_gpus
+    else:
+        # Fallback to CPU training when --num_gpus 0
+        accelerator = "cpu"
+        devices = 1  # Lightning expects at least one device
+
     trainer = pl.Trainer(
         default_root_dir=args.checkpoint_dir,
-        strategy="ddp_find_unused_parameters_true",
-        accelerator="gpu",
-        devices=1 if args.debug else args.num_gpus,
-        precision="16-mixed",
+        strategy=("ddp_find_unused_parameters_true" if accelerator == "gpu" and devices > 1 else "auto"),
+        accelerator=accelerator,
+        devices=devices,
+        precision="16-mixed" if accelerator == "gpu" else 32,
         max_epochs=args.max_epochs,
         deterministic=False,
         enable_checkpointing=True,
-        callbacks=[save_checkpoint],
+        callbacks=callbacks,
         accumulate_grad_batches=args.accumulate_grad_batches,
+        log_every_n_steps=args.log_every_n_steps,
     )
 
     # Finetune the model
@@ -238,7 +372,7 @@ if __name__ == "__main__":
         "--max_epochs", type=int, default=15, help="Maximum number of epochs to train"
     )
     parser.add_argument(
-        "--num_workers", type=int, default=5, help="Number of workers for data loading"
+        "--num_workers", type=int, default=3, help="Number of workers for data loading"
     )
     parser.add_argument(
         "--accumulate_grad_batches",
@@ -276,6 +410,35 @@ if __name__ == "__main__":
         type=float,
         default=0.0,
         help="Weight for the GC content penalty in the loss function",
+    )
+    parser.add_argument(
+        "--gc_target",
+        type=float,
+        default=0.52,
+        help="Target GC content (default: 0.52 for E. coli)",
+    )
+    parser.add_argument(
+        "--use_lagrangian",
+        action="store_true",
+        help="Use Augmented-Lagrangian method for GC control",
+    )
+    parser.add_argument(
+        "--lagrangian_rho",
+        type=float,
+        default=10.0,
+        help="Penalty coefficient for Augmented-Lagrangian method",
+    )
+    parser.add_argument(
+        "--curriculum_epochs",
+        type=int,
+        default=3,
+        help="Number of warm-up epochs before enforcing GC constraints",
+    )
+    parser.add_argument(
+        "--log_every_n_steps",
+        type=int,
+        default=20,
+        help="How often to log metrics (in training steps)",
     )
     args = parser.parse_args()
     main(args)
