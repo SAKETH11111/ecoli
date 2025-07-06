@@ -176,7 +176,54 @@ lightning_logs/
 # PyTorch model weights
 *.pth
 *.pt
+
 # Large files excluded from Git
 models/ecoli-codon-optimizer/finetune.ckpt
 models/ecoli-codon-optimizer/finetune_best.ckpt
 data/ecoli_processed_genes.csv
+
+# Finetune-related files (keep local only)
+finetune.py
+checkpoints/
+*.ckpt
+*.safetensors
+
+# Benchmark and validation results
+benchmark_plots/
+cai_tai_benchmark.csv
+synthetic_validation.csv
+test_set_validation.csv
+
+# Large data files
+*.csv
+*.jsonl
+*.json
+*.fasta
+*.fa
+
+# Results and outputs
+results/
+outputs/
+logs/
+
+# Model files and weights
+models/
+*.bin
+*.safetensors
+
+# CUDA and GPU related
+*.run
+cuda_installer.pyz
+
+# R files
+.RData
+.Rhistory
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
