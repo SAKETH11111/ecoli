@@ -28,6 +28,9 @@ from CodonTransformer.CodonEvaluation import (
     get_min_max_profile,
     get_sequence_similarity,
     scan_for_restriction_sites,
+    calculate_ENC,
+    calculate_CPB,
+    calculate_SCUO,
 )
 from CodonTransformer.CodonUtils import DNASequencePrediction
 
@@ -181,6 +184,11 @@ def main(args):
                 dtw_distance = calculate_dtw_distance(
                     min_max_profile, avg_reference_profile
                 )
+            
+            # Enhanced Codon Usage Metrics
+            enc_value = calculate_ENC(dna_sequence)
+            cpb_value = calculate_CPB(dna_sequence, ref_sequences[:100])  # Use subset for efficiency
+            scuo_value = calculate_SCUO(dna_sequence)
 
             # Store results
             results.append(
@@ -195,6 +203,9 @@ def main(args):
                     "neg_cis_elements": neg_cis_elements,
                     "homopolymer_runs": homopolymer_runs,
                     "dtw_distance": dtw_distance,
+                    "enc": enc_value,
+                    "cpb": cpb_value,
+                    "scuo": scuo_value,
                 }
             )
 

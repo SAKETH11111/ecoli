@@ -72,5 +72,10 @@
             "fine_tuned_vs_naive_hfc": "skipped (zero variance)",
             "base_vs_naive_hfc": "skipped (zero variance)"
         }
+    },
+    "new_metrics_available": {
+        "enc": false,
+        "cpb": false,
+        "scuo": false
     }
 }
