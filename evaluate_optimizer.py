@@ -16,6 +16,7 @@ from CodonTransformer.CodonData import (
 from CodonTransformer.CodonPrediction import (
     load_model,
     predict_dna_sequence,
+    predict_dna_sequence_constrained_beam_search,
     get_high_frequency_choice_sequence_optimized,
 )
 from CodonTransformer.CodonEvaluation import (
@@ -113,6 +114,13 @@ def main(args):
     # --- 4. Run Evaluation Loop ---
     results = []
     print("Starting evaluation loop...")
+    print("Models being evaluated:")
+    print("  1. Fine-tuned CodonTransformer")
+    print("  2. Base CodonTransformer")
+    print("  3. Naive High-Frequency Choice")
+    print("  4. Enhanced Constrained Beam Search (GC-Guaranteed)")
+    print()
+    
     for item in tqdm(test_set, desc="Evaluating Proteins"):
         if "protein_sequence" in item:
             protein_sequence = item["protein_sequence"]
@@ -158,10 +166,30 @@ def main(args):
             protein=protein_sequence, codon_frequencies=codon_frequencies
         )
 
+        # D. Enhanced Constrained Beam Search (GC-Guaranteed)
+        try:
+            constrained_output = predict_dna_sequence_constrained_beam_search(
+                protein=protein_sequence,
+                organism="Escherichia coli general",
+                device=device,
+                model=finetuned_model,
+                gc_target_min=0.45,
+                gc_target_max=0.55,
+                beam_size=None,  # Adaptive based on sequence length
+                match_protein=True,
+                verbose=False,  # Quiet for evaluation loop
+                gc_weight=0.5,  # Moderate GC penalty
+            )
+            constrained_dna = constrained_output.predicted_dna
+        except Exception as e:
+            print(f"Warning: Constrained beam search failed for protein {protein_sequence[:20]}...: {e}")
+            constrained_dna = finetuned_dna  # Fallback to fine-tuned model
+
         sequences_to_evaluate = {
             "fine_tuned": finetuned_dna,
             "base": base_dna,
             "naive_hfc": naive_dna,
+            "constrained_gc": constrained_dna,
         }
 
         # --- Calculate Metrics for each sequence ---
