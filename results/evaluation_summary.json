@@ -2,26 +2,26 @@
     "mean_metrics": {
         "cai": {
             "base": 0.7394387189756063,
-            "constrained_gc": 0.8366350891396442,
-            "fine_tuned": 0.8366350891396442,
+            "constrained_gc": 0.6811000106882994,
+            "fine_tuned": 0.8363273998930835,
             "naive_hfc": 1.0
         },
         "tai": {
             "base": 0.2554038946305578,
-            "constrained_gc": 0.2687699219744012,
-            "fine_tuned": 0.2687699219744012,
+            "constrained_gc": 0.2528953814331696,
+            "fine_tuned": 0.2683048963204997,
             "naive_hfc": 0.2842507382113359
         },
         "dtw_distance": {
             "base": 37120.368801017205,
-            "constrained_gc": 29763.64113644357,
-            "fine_tuned": 29763.64113644357,
+            "constrained_gc": 67314.00931595187,
+            "fine_tuned": 29490.50748058925,
             "naive_hfc": 346041.6736618579
         },
         "gc_content": {
             "base": 64.06016523933832,
-            "constrained_gc": 69.40558042052731,
-            "fine_tuned": 69.40558042052731,
+            "constrained_gc": 55.5811642418326,
+            "fine_tuned": 69.38000233865515,
             "naive_hfc": 83.98123298709645
         },
         "restriction_sites": {
@@ -44,20 +44,20 @@
         },
         "enc": {
             "base": 44.608179675515395,
-            "constrained_gc": 42.279384322694334,
-            "fine_tuned": 42.279384322694334,
+            "constrained_gc": 42.70711094018716,
+            "fine_tuned": 42.312371559764244,
             "naive_hfc": 33.239283598746795
         },
         "cpb": {
             "base": -0.18241640686183838,
-            "constrained_gc": -0.28242719230382574,
-            "fine_tuned": -0.28242719230382574,
+            "constrained_gc": -0.25587395936753765,
+            "fine_tuned": -0.28381914289707405,
             "naive_hfc": -0.2934121633282833
         },
         "scuo": {
             "base": 0.23501259711297803,
-            "constrained_gc": 0.36377734449257076,
-            "fine_tuned": 0.36377734449257076,
+            "constrained_gc": 0.538170194252132,
+            "fine_tuned": 0.3622839654699587,
             "naive_hfc": 1.0
         }
     },
@@ -68,12 +68,12 @@
             "base_vs_naive_hfc": "skipped (zero variance)"
         },
         "tai": {
-            "fine_tuned_vs_base": 1.3342953499027622e-13,
-            "fine_tuned_vs_naive_hfc": 2.2069547466224186e-17,
+            "fine_tuned_vs_base": 4.450203031571543e-13,
+            "fine_tuned_vs_naive_hfc": 1.8478899002670448e-17,
             "base_vs_naive_hfc": 4.670683307897806e-18
         },
         "dtw_distance": {
-            "fine_tuned_vs_base": 5.5553367024033285e-08,
+            "fine_tuned_vs_base": 9.853585498721036e-08,
             "fine_tuned_vs_naive_hfc": 3.896559845095909e-18,
             "base_vs_naive_hfc": 3.896559845095909e-18
         },
@@ -98,17 +98,17 @@
             "base_vs_naive_hfc": "skipped (zero variance)"
         },
         "enc": {
-            "fine_tuned_vs_base": 2.9955051713902106e-10,
+            "fine_tuned_vs_base": 7.365085129144919e-10,
             "fine_tuned_vs_naive_hfc": 3.896559845095909e-18,
             "base_vs_naive_hfc": 3.896559845095909e-18
         },
         "cpb": {
-            "fine_tuned_vs_base": 3.0528209793531665e-17,
-            "fine_tuned_vs_naive_hfc": 0.0040917391418793594,
+            "fine_tuned_vs_base": 1.3732250242604873e-17,
+            "fine_tuned_vs_naive_hfc": 0.015940905907188684,
             "base_vs_naive_hfc": 5.269204481546392e-18
         },
         "scuo": {
-            "fine_tuned_vs_base": 1.0148444729189685e-15,
+            "fine_tuned_vs_base": 9.071993454725491e-16,
             "fine_tuned_vs_naive_hfc": "skipped (zero variance)",
             "base_vs_naive_hfc": "skipped (zero variance)"
         }

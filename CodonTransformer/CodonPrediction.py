@@ -28,6 +28,7 @@ from CodonTransformer.CodonUtils import (
     ORGANISM2ID,
     TOKEN2INDEX,
     DNASequencePrediction,
+    CODON_GC_CONTENT,
 )
 
 
@@ -884,14 +885,14 @@ def predict_dna_sequence_constrained_beam_search(
 ) -> DNASequencePrediction:
     """
     Generate DNA sequence with ENHANCED GC-aware constrained beam search.
-    
+
     This is the improved "Guardrail" approach with smart fixes for long sequences:
     1. Adaptive beam size based on sequence length
     2. GC-aware scoring that penalizes deviations from 50% target
     3. Better lookahead with conservative GC budget calculations
     4. GC checkpoint tracking for course correction
     5. Restart mechanism when beams are exhausted
-    
+
     Strategy:
     1. Maintain multiple candidate sequences (adaptive beam size)
     2. At each step, expand beams with GC-aware scoring
@@ -899,7 +900,7 @@ def predict_dna_sequence_constrained_beam_search(
     4. PRUNE beams that cannot possibly reach target GC range
     5. Monitor GC at checkpoints and adjust course
     6. Restart with relaxed constraints if needed
-    
+
     Args:
         protein: Input protein sequence
         organism: Target organism for optimization
@@ -913,11 +914,11 @@ def predict_dna_sequence_constrained_beam_search(
         temperature: Sampling temperature
         verbose: Print debugging information
         gc_weight: Weight for GC penalty in scoring (default: 0.5)
-        
+
     Returns:
         DNASequencePrediction with guaranteed GC content in target range
     """
-    
+
     # Load tokenizer and model if needed
     if tokenizer is None:
         tokenizer = AutoTokenizer.from_pretrained("adibvafa/CodonTransformer")
@@ -938,9 +939,9 @@ def predict_dna_sequence_constrained_beam_search(
     organism_id = ORGANISM2ID.get(organism, organism)
     if not isinstance(organism_id, int):
         raise ValueError(f"Invalid organism: {organism}")
-    
+
     organism_name = next(name for name, id in ORGANISM2ID.items() if id == organism_id)
-    
+
     # Adaptive beam size based on sequence length
     if beam_size is None:
         if len(protein) <= 50:
@@ -951,19 +952,22 @@ def predict_dna_sequence_constrained_beam_search(
             beam_size = 60
         else:
             beam_size = 80  # Large beam for very long sequences
-    
+
     # GC target center for scoring
     gc_target_center = (gc_target_min + gc_target_max) / 2.0
-    
+
     if verbose:
         print(f"🎯 ENHANCED Constrained Beam Search (GC: {gc_target_min:.1%}-{gc_target_max:.1%})")
         print(f"   Protein: {protein[:40]}... ({len(protein)} aa)")
         print(f"   Adaptive beam size: {beam_size}")
         print(f"   GC target center: {gc_target_center:.1%}")
-    
+
+    # Pre-compute exact per-amino-acid GC bounds (Priority Fix #1)
+    AA_MIN_GC, AA_MAX_GC = _compute_amino_acid_gc_bounds()
+
     # Create GC content lookup for codons
     codon_gc_content = _create_codon_gc_lookup()
-    
+
     # Prepare input
     merged_seq = get_merged_seq(protein, None)
     input_dict = {
@@ -994,75 +998,98 @@ def predict_dna_sequence_constrained_beam_search(
     beams = [([], "", 0.0, 0.0, 0.0)]
     sequence_length = len(possible_tokens_per_position)
     checkpoint_interval = max(10, sequence_length // 10)  # GC checkpoints every 10% of sequence
-    
+
+    # Priority Fix #3: Adaptive beam rescue variables
+    min_beam = max(8, beam_size // 10)  # Minimum beam size threshold
+    relaxation_level = 0  # Track how much we've relaxed constraints
+    saved_pruned_sequences = []  # Queue for rescued sequences
+    rescue_interval = 10  # Check for rescue every 10 positions
+
     if verbose:
         print(f"   Sequence length: {sequence_length} codons")
         print(f"   GC checkpoints every {checkpoint_interval} positions")
-    
+
     # Enhanced beam search with GC-aware scoring
     for pos in range(sequence_length):
         if verbose and pos % 10 == 0:
             print(f"   Position {pos}/{sequence_length}, beams: {len(beams)}")
-        
+
         new_beams = []
         position_logits = logits[0, pos, :]  # Logits for this position
         possible_tokens = possible_tokens_per_position[pos]
-        
+
         # Sort tokens by logits for better exploration
         token_scores = [(token_idx, position_logits[token_idx].item()) for token_idx in possible_tokens]
         token_scores.sort(key=lambda x: x[1], reverse=True)
-        
+
         for seq_indices, seq_dna, score, current_gc, gc_penalty in beams:
             # Consider each possible token for this position
             for token_idx, token_logit in token_scores:
                 token_name = INDEX2TOKEN[token_idx]
                 codon = token_name[-3:].upper()  # Extract codon sequence
-                
+
                 # Calculate new sequence properties
                 new_seq_indices = seq_indices + [token_idx]
                 new_seq_dna = seq_dna + codon
                 new_gc = _calculate_gc_content_fast(new_seq_dna)
-                
+
                 # ENHANCED GC-AWARE SCORING
                 # Base score from model
                 base_score = score + token_logit
-                
-                # GC penalty - penalize deviation from target center
+
+                # SMART SCORING: Model likelihood first, GC as tie-breaker
+                # Only apply penalty for significant GC deviations (>3%)
                 gc_deviation = abs(new_gc - gc_target_center)
-                gc_penalty_component = gc_weight * gc_deviation * 100  # Scale penalty
-                total_score = base_score - gc_penalty_component
-                
-                # CONSERVATIVE GC CONSTRAINT CHECK
+
+                if gc_deviation > 0.03:  # Only penalize if >3% deviation
+                    progress = (pos + 1) / sequence_length  # 0 → 1
+                    lambda_gc = 0.01 + 0.04 * progress  # Very gentle: 0.01 → 0.05
+                    gc_penalty_component = lambda_gc * (gc_deviation - 0.03) * 5  # Only penalty above 3%
+                    total_score = base_score - gc_penalty_component
+                else:
+                    # No penalty for small deviations - preserve model likelihood
+                    gc_penalty_component = 0.0
+                    total_score = base_score
+
+                # EXACT GC CONSTRAINT CHECK (Priority Fix #1)
                 remaining_positions = sequence_length - pos - 1
                 if remaining_positions > 0:
-                    # More conservative GC budget calculation
-                    min_possible_gc = _calculate_min_possible_gc_conservative(new_seq_dna, remaining_positions)
-                    max_possible_gc = _calculate_max_possible_gc_conservative(new_seq_dna, remaining_positions)
-                    
-                    # PRUNE if impossible to reach target with conservative estimates
+                    # Calculate exact GC bounds based on remaining amino acids
+                    remaining_aas = protein[pos + 1:]
+                    min_possible_gc, max_possible_gc = _calculate_exact_gc_bounds(
+                        new_seq_dna, remaining_aas, AA_MIN_GC, AA_MAX_GC
+                    )
+
+                    # PRUNE if impossible to reach target with exact bounds
                     if max_possible_gc < gc_target_min or min_possible_gc > gc_target_max:
+                        # Save pruned sequence for potential rescue (Priority Fix #3)
+                        if len(saved_pruned_sequences) < beam_size * 2:  # Limit queue size
+                            saved_pruned_sequences.append((new_seq_indices, new_seq_dna, total_score, new_gc, gc_penalty_component))
                         continue  # Skip this beam - cannot reach target
-                
+
                 else:
                     # Final position - check if within target range
                     if not (gc_target_min <= new_gc <= gc_target_max):
+                        # Save pruned sequence for potential rescue (Priority Fix #3)
+                        if len(saved_pruned_sequences) < beam_size * 2:  # Limit queue size
+                            saved_pruned_sequences.append((new_seq_indices, new_seq_dna, total_score, new_gc, gc_penalty_component))
                         continue  # Skip - final GC outside target
-                
+
                 # Add to candidate beams
                 new_beams.append((new_seq_indices, new_seq_dna, total_score, new_gc, gc_penalty_component))
-        
+
         # ENHANCED RESTART MECHANISM
         if len(new_beams) == 0:
             if verbose:
                 print(f"   ❌ No valid beams at position {pos}! Activating restart mechanism...")
-            
+
             # Restart with relaxed constraints or backtracking
             temp_gc_min = max(0.40, gc_target_min - 0.05)  # Relax by 5%
             temp_gc_max = min(0.60, gc_target_max + 0.05)
-            
+
             if verbose:
                 print(f"   🔄 Relaxing constraints to {temp_gc_min:.1%}-{temp_gc_max:.1%}")
-            
+
             # Try with relaxed constraints
             for seq_indices, seq_dna, score, current_gc, gc_penalty in beams:
                 for token_idx, token_logit in token_scores[:10]:  # Try top 10 tokens
@@ -1071,68 +1098,110 @@ def predict_dna_sequence_constrained_beam_search(
                     new_seq_indices = seq_indices + [token_idx]
                     new_seq_dna = seq_dna + codon
                     new_gc = _calculate_gc_content_fast(new_seq_dna)
-                    
+
                     # Check with relaxed constraints
                     remaining_positions = sequence_length - pos - 1
                     if remaining_positions > 0:
-                        min_possible_gc = _calculate_min_possible_gc_conservative(new_seq_dna, remaining_positions)
-                        max_possible_gc = _calculate_max_possible_gc_conservative(new_seq_dna, remaining_positions)
+                        remaining_aas = protein[pos + 1:]
+                        min_possible_gc, max_possible_gc = _calculate_exact_gc_bounds(
+                            new_seq_dna, remaining_aas, AA_MIN_GC, AA_MAX_GC
+                        )
                         if max_possible_gc < temp_gc_min or min_possible_gc > temp_gc_max:
                             continue
                     else:
                         if not (temp_gc_min <= new_gc <= temp_gc_max):
                             continue
-                    
-                    # GC-aware scoring with relaxed constraints
+
+                    # GC-aware scoring with relaxed constraints - preserve model likelihood
                     base_score = score + token_logit
                     gc_deviation = abs(new_gc - gc_target_center)
-                    gc_penalty_component = gc_weight * gc_deviation * 100
-                    total_score = base_score - gc_penalty_component
-                    
+
+                    if gc_deviation > 0.03:  # Only penalize if >3% deviation
+                        progress = (pos + 1) / sequence_length  # 0 → 1
+                        lambda_gc = 0.01 + 0.04 * progress  # Very gentle: 0.01 → 0.05
+                        gc_penalty_component = lambda_gc * (gc_deviation - 0.03) * 5  # Only penalty above 3%
+                        total_score = base_score - gc_penalty_component
+                    else:
+                        # No penalty for small deviations - preserve model likelihood
+                        gc_penalty_component = 0.0
+                        total_score = base_score
+
                     new_beams.append((new_seq_indices, new_seq_dna, total_score, new_gc, gc_penalty_component))
                     if len(new_beams) >= beam_size:
                         break
                 if len(new_beams) >= beam_size:
                     break
-        
+
         # Sort by GC-aware score and keep top beams
         new_beams.sort(key=lambda x: x[2], reverse=True)  # Sort by total score (with GC penalty)
         beams = new_beams[:beam_size]
-        
+
+        # ADAPTIVE BEAM RESCUE (Priority Fix #3)
+        if len(beams) < min_beam and pos % rescue_interval == 0 and relaxation_level < 2:
+            if verbose:
+                print(f"   🚨 Beam rescue triggered: {len(beams)} < {min_beam} beams at position {pos}")
+
+            relaxation_level += 1
+            # Widen GC band by 1%
+            temp_gc_min = max(0.40, gc_target_min - (relaxation_level * 0.01))
+            temp_gc_max = min(0.60, gc_target_max + (relaxation_level * 0.01))
+
+            if verbose:
+                print(f"   🔄 Rescue level {relaxation_level}: GC band {temp_gc_min:.1%}-{temp_gc_max:.1%}")
+
+            # Re-insert saved pruned sequences that now fit relaxed constraints
+            rescue_candidates = []
+            for seq_indices, seq_dna, score, gc_content, gc_penalty in saved_pruned_sequences:
+                # Check if sequence fits relaxed constraints
+                if temp_gc_min <= gc_content <= temp_gc_max:
+                    # Soften penalty slightly for rescued sequences
+                    softened_penalty = gc_penalty * (0.8 ** relaxation_level)
+                    adjusted_score = score + (gc_penalty - softened_penalty)  # Recover some penalty
+                    rescue_candidates.append((seq_indices, seq_dna, adjusted_score, gc_content, softened_penalty))
+
+            # Add best rescue candidates to beams
+            rescue_candidates.sort(key=lambda x: x[2], reverse=True)
+            beams.extend(rescue_candidates[:min_beam - len(beams)])
+
+            if verbose:
+                print(f"   ✅ Rescued {len(rescue_candidates[:min_beam - len(beams)])} sequences, total beams: {len(beams)}")
+
         # GC CHECKPOINT MONITORING
         if pos % checkpoint_interval == 0 and pos > 0:
             if beams:
                 avg_gc = sum(beam[3] for beam in beams) / len(beams)
                 if verbose:
                     print(f"   📊 Checkpoint {pos}/{sequence_length}: Avg GC = {avg_gc:.1%}")
-        
+
         if verbose and pos % 10 == 0 and beams:
             best_beam = beams[0]
             print(f"     Best beam GC: {best_beam[3]:.1%}, Score: {best_beam[2]:.2f}, GC penalty: {best_beam[4]:.1f}")
-    
+
     # Select best final beam with SMART SELECTION
     if len(beams) == 0:
         raise RuntimeError("No valid sequences found with GC constraints!")
-    
-    # Sort beams by proximity to GC target center, then by score
+
+    # Sort beams by MODEL LIKELIHOOD first, then GC proximity as tie-breaker
     def beam_score(beam):
         seq_indices, seq_dna, total_score, gc_content, gc_penalty = beam
+        # Primary: model likelihood (higher is better)
+        # Secondary: GC proximity (closer to target is better)
         gc_proximity = abs(gc_content - gc_target_center)
-        return (-gc_proximity, total_score)  # Negative for ascending sort
-    
+        return (total_score, -gc_proximity)  # Model score first, then GC proximity
+
     beams.sort(key=beam_score)
     best_beam = beams[0]
     final_sequence = best_beam[1]
     final_gc = best_beam[3]
     final_score = best_beam[2]
     final_gc_penalty = best_beam[4]
-    
+
     if verbose:
         print(f"   🎉 Final sequence: {final_sequence[:30]}...")
         print(f"   🎯 Final GC: {final_gc:.1%} (target: {gc_target_min:.1%}-{gc_target_max:.1%})")
         print(f"   📊 Final score: {final_score:.2f}, GC penalty: {final_gc_penalty:.1f}")
         print(f"   ✅ Constraint satisfied: {gc_target_min <= final_gc <= gc_target_max}")
-    
+
     # Verify constraint compliance
     if not (gc_target_min <= final_gc <= gc_target_max):
         # One last attempt with the most GC-friendly beam
@@ -1146,7 +1215,7 @@ def predict_dna_sequence_constrained_beam_search(
                 break
         else:
             raise RuntimeError(f"CONSTRAINT VIOLATION: GC={final_gc:.1%} outside target range!")
-    
+
     return DNASequencePrediction(
         organism=organism_name,
         protein=protein,
@@ -1167,6 +1236,50 @@ def _create_codon_gc_lookup():
     return codon_gc
 
 
+def _compute_amino_acid_gc_bounds():
+    """Pre-compute exact per-amino-acid GC bounds (Priority Fix #1)."""
+    AA_MIN_GC = {}
+    AA_MAX_GC = {}
+
+    for aa, token_indices in AMINO_ACID_TO_INDEX.items():
+        gc_counts = []
+        for token_idx in token_indices:
+            token_name = INDEX2TOKEN[token_idx]
+            if "_" in token_name:
+                codon = token_name.split("_")[-1].upper()
+                if len(codon) == 3:
+                    gc_count = codon.count('G') + codon.count('C')
+                    gc_counts.append(gc_count)
+
+        if gc_counts:
+            AA_MIN_GC[aa] = min(gc_counts)
+            AA_MAX_GC[aa] = max(gc_counts)
+        else:
+            # Fallback for edge cases
+            AA_MIN_GC[aa] = 0
+            AA_MAX_GC[aa] = 3
+
+    return AA_MIN_GC, AA_MAX_GC
+
+
+def _calculate_exact_gc_bounds(current_seq_dna, remaining_aas, AA_MIN_GC, AA_MAX_GC):
+    """Calculate exact GC bounds based on remaining amino acids (Priority Fix #1)."""
+    current_gc_count = current_seq_dna.count('G') + current_seq_dna.count('C')
+
+    # Calculate minimum and maximum possible GC from remaining amino acids
+    rem_min = sum(AA_MIN_GC.get(aa, 0) for aa in remaining_aas)
+    rem_max = sum(AA_MAX_GC.get(aa, 3) for aa in remaining_aas)
+
+    # Calculate total sequence length
+    total_len = len(current_seq_dna) + len(remaining_aas) * 3
+
+    # Calculate bounds as percentages
+    min_possible_gc = (current_gc_count + rem_min) / total_len
+    max_possible_gc = (current_gc_count + rem_max) / total_len
+
+    return min_possible_gc, max_possible_gc
+
+
 def _calculate_gc_content_fast(dna_sequence: str) -> float:
     """Fast GC content calculation."""
     if not dna_sequence:
@@ -1179,7 +1292,7 @@ def _calculate_min_possible_gc(partial_sequence: str, remaining_positions: int) 
     """Calculate minimum possible GC content if remaining positions use all-AT codons."""
     if remaining_positions == 0:
         return _calculate_gc_content_fast(partial_sequence)
-    
+
     # Add all-AT codons (0% GC) for remaining positions
     total_length = len(partial_sequence) + (remaining_positions * 3)
     current_gc_count = partial_sequence.count('G') + partial_sequence.count('C')
@@ -1191,7 +1304,7 @@ def _calculate_max_possible_gc(partial_sequence: str, remaining_positions: int) 
     """Calculate maximum possible GC content if remaining positions use all-GC codons."""
     if remaining_positions == 0:
         return _calculate_gc_content_fast(partial_sequence)
-    
+
     # Add all-GC codons (100% GC) for remaining positions
     total_length = len(partial_sequence) + (remaining_positions * 3)
     current_gc_count = partial_sequence.count('G') + partial_sequence.count('C')
@@ -1200,29 +1313,28 @@ def _calculate_max_possible_gc(partial_sequence: str, remaining_positions: int) 
 
 
 def _calculate_min_possible_gc_conservative(partial_sequence: str, remaining_positions: int) -> float:
-    """Conservative estimate of minimum possible GC content."""
+    """Conservative estimate of minimum possible GC content (DEPRECATED - use exact bounds)."""
     if remaining_positions == 0:
         return _calculate_gc_content_fast(partial_sequence)
-    
+
     # Use slightly higher estimate than theoretical minimum for safety margin
     total_length = len(partial_sequence) + (remaining_positions * 3)
     current_gc_count = partial_sequence.count('G') + partial_sequence.count('C')
-    
+
     # Conservative estimate: assume 10% GC for remaining positions (safety margin)
     conservative_additional_gc = remaining_positions * 3 * 0.1
     return (current_gc_count + conservative_additional_gc) / total_length
 
 
 def _calculate_max_possible_gc_conservative(partial_sequence: str, remaining_positions: int) -> float:
-    """Conservative estimate of maximum possible GC content."""
+    """Conservative estimate of maximum possible GC content (DEPRECATED - use exact bounds)."""
     if remaining_positions == 0:
         return _calculate_gc_content_fast(partial_sequence)
-    
+
     # Use slightly lower estimate than theoretical maximum for safety margin
     total_length = len(partial_sequence) + (remaining_positions * 3)
     current_gc_count = partial_sequence.count('G') + partial_sequence.count('C')
-    
+
     # Conservative estimate: assume 90% GC for remaining positions (safety margin)
     conservative_additional_gc = remaining_positions * 3 * 0.9
     return (current_gc_count + conservative_additional_gc) / total_length
-
