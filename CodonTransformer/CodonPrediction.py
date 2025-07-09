@@ -860,3 +860,4 @@ def get_icor_prediction(input_seq: str, model_path: str, stop_symbol: str) -> st
         out_str += labels[index]
 
     return out_str
+

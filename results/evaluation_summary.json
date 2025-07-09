@@ -2,52 +2,62 @@
     "mean_metrics": {
         "cai": {
             "base": 0.7394387189756063,
-            "fine_tuned": 0.829635271034789,
+            "fine_tuned": 0.8363051301031039,
+            "fine_tuned_gc_constrained": 0.7677559110049645,
             "naive_hfc": 1.0
         },
         "tai": {
             "base": 0.2554038946305578,
-            "fine_tuned": 0.2870640689835264,
+            "fine_tuned": 0.2682356020206898,
+            "fine_tuned_gc_constrained": 0.24955119058734282,
             "naive_hfc": 0.2842507382113359
         },
         "dtw_distance": {
             "base": 37120.368801017205,
-            "fine_tuned": 30700.194899161314,
+            "fine_tuned": 29964.076877900865,
+            "fine_tuned_gc_constrained": 37020.08817213892,
             "naive_hfc": 346041.6736618579
         },
         "gc_content": {
             "base": 64.06016523933832,
-            "fine_tuned": 70.29212777319788,
+            "fine_tuned": 69.3471737983833,
+            "fine_tuned_gc_constrained": 64.41894226596877,
             "naive_hfc": 83.98123298709645
         },
         "restriction_sites": {
             "base": 0.0,
             "fine_tuned": 0.0,
+            "fine_tuned_gc_constrained": 0.01,
             "naive_hfc": 0.0
         },
         "neg_cis_elements": {
             "base": 0.0,
             "fine_tuned": 0.0,
+            "fine_tuned_gc_constrained": 0.0,
             "naive_hfc": 0.0
         },
         "homopolymer_runs": {
             "base": 0.0,
             "fine_tuned": 0.0,
+            "fine_tuned_gc_constrained": 0.01,
             "naive_hfc": 0.0
         },
         "enc": {
             "base": 44.608179675515395,
-            "fine_tuned": 44.935178075881716,
+            "fine_tuned": 42.30047351286384,
+            "fine_tuned_gc_constrained": 42.99863693857792,
             "naive_hfc": 33.239283598746795
         },
         "cpb": {
             "base": -0.18241640686183838,
-            "fine_tuned": -0.27287165022744714,
+            "fine_tuned": -0.27814963588529973,
+            "fine_tuned_gc_constrained": -0.24639512204077554,
             "naive_hfc": -0.2934121633282833
         },
         "scuo": {
             "base": 0.23501259711297803,
-            "fine_tuned": 0.2660599154084668,
+            "fine_tuned": 0.36422434254233693,
+            "fine_tuned_gc_constrained": 0.301386218174228,
             "naive_hfc": 1.0
         }
     },
@@ -58,12 +68,12 @@
             "base_vs_naive_hfc": "skipped (zero variance)"
         },
         "tai": {
-            "fine_tuned_vs_base": 3.896559845095909e-18,
-            "fine_tuned_vs_naive_hfc": 0.13295565246313223,
+            "fine_tuned_vs_base": 3.0383342586188437e-13,
+            "fine_tuned_vs_naive_hfc": 1.082004916926409e-17,
             "base_vs_naive_hfc": 4.670683307897806e-18
         },
         "dtw_distance": {
-            "fine_tuned_vs_base": 8.616690808849393e-05,
+            "fine_tuned_vs_base": 1.0119624185629907e-06,
             "fine_tuned_vs_naive_hfc": 3.896559845095909e-18,
             "base_vs_naive_hfc": 3.896559845095909e-18
         },
@@ -88,17 +98,17 @@
             "base_vs_naive_hfc": "skipped (zero variance)"
         },
         "enc": {
-            "fine_tuned_vs_base": 0.1586243896481534,
+            "fine_tuned_vs_base": 1.1948733160530286e-10,
             "fine_tuned_vs_naive_hfc": 3.896559845095909e-18,
             "base_vs_naive_hfc": 3.896559845095909e-18
         },
         "cpb": {
-            "fine_tuned_vs_base": 8.519072542858556e-18,
-            "fine_tuned_vs_naive_hfc": 1.789646852073692e-06,
+            "fine_tuned_vs_base": 2.0802135592284146e-17,
+            "fine_tuned_vs_naive_hfc": 0.00021300115798831716,
             "base_vs_naive_hfc": 5.269204481546392e-18
         },
         "scuo": {
-            "fine_tuned_vs_base": 0.0017141393943961346,
+            "fine_tuned_vs_base": 4.235271113204814e-16,
             "fine_tuned_vs_naive_hfc": "skipped (zero variance)",
             "base_vs_naive_hfc": "skipped (zero variance)"
         }
