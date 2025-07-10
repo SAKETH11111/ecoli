@@ -418,23 +418,29 @@ def create_model_from_checkpoint(
     torch.save(state_dict, output_model_dir)
 
 
-def load_tokenizer(tokenizer_path: Optional[str] = None) -> PreTrainedTokenizerFast:
+def load_tokenizer(tokenizer_path: Optional[Union[str, PreTrainedTokenizerFast]] = None) -> PreTrainedTokenizerFast:
     """
     Create and return a tokenizer object from tokenizer path or HuggingFace.
 
     Args:
-        tokenizer_path (Optional[str]): Path to the tokenizer file. If None,
-        load from HuggingFace.
+        tokenizer_path (Optional[Union[str, PreTrainedTokenizerFast]]): Path to the tokenizer file, 
+        a pre-loaded tokenizer object, or None. If None, load from HuggingFace.
 
     Returns:
         PreTrainedTokenizerFast: The tokenizer object.
     """
+    # If a tokenizer object is already provided, return it
+    if isinstance(tokenizer_path, PreTrainedTokenizerFast):
+        return tokenizer_path
+    
+    # If no path is provided, load from HuggingFace
     if not tokenizer_path:
         warnings.warn(
             "Tokenizer path not provided. Loading from HuggingFace.", UserWarning
         )
         return AutoTokenizer.from_pretrained("adibvafa/CodonTransformer")
 
+    # Load from file path
     return transformers.PreTrainedTokenizerFast(
         tokenizer_file=tokenizer_path,
         bos_token="[CLS]",

@@ -185,7 +185,6 @@ data/ecoli_processed_genes.csv
 # Finetune-related files (keep local only)
 finetune.py
 checkpoints/
-*.ckpt
 *.safetensors
 
 # Benchmark and validation results
@@ -207,7 +206,6 @@ outputs/
 logs/
 
 # Model files and weights
-models/
 *.bin
 *.safetensors
 
