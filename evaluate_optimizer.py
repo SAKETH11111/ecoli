@@ -34,6 +34,38 @@ from CodonTransformer.CodonEvaluation import (
 )
 from CodonTransformer.CodonUtils import DNASequencePrediction
 
+def translate_dna_to_protein(dna_sequence: str) -> str:
+    """Translate DNA sequence to protein sequence."""
+    codon_table = {
+        'TTT': 'F', 'TTC': 'F', 'TTA': 'L', 'TTG': 'L',
+        'TCT': 'S', 'TCC': 'S', 'TCA': 'S', 'TCG': 'S',
+        'TAT': 'Y', 'TAC': 'Y', 'TAA': '*', 'TAG': '*',
+        'TGT': 'C', 'TGC': 'C', 'TGA': '*', 'TGG': 'W',
+        'CTT': 'L', 'CTC': 'L', 'CTA': 'L', 'CTG': 'L',
+        'CCT': 'P', 'CCC': 'P', 'CCA': 'P', 'CCG': 'P',
+        'CAT': 'H', 'CAC': 'H', 'CAA': 'Q', 'CAG': 'Q',
+        'CGT': 'R', 'CGC': 'R', 'CGA': 'R', 'CGG': 'R',
+        'ATT': 'I', 'ATC': 'I', 'ATA': 'I', 'ATG': 'M',
+        'ACT': 'T', 'ACC': 'T', 'ACA': 'T', 'ACG': 'T',
+        'AAT': 'N', 'AAC': 'N', 'AAA': 'K', 'AAG': 'K',
+        'AGT': 'S', 'AGC': 'S', 'AGA': 'R', 'AGG': 'R',
+        'GTT': 'V', 'GTC': 'V', 'GTA': 'V', 'GTG': 'V',
+        'GCT': 'A', 'GCC': 'A', 'GCA': 'A', 'GCG': 'A',
+        'GAT': 'D', 'GAC': 'D', 'GAA': 'E', 'GAG': 'E',
+        'GGT': 'G', 'GGC': 'G', 'GGA': 'G', 'GGG': 'G'
+    }
+    
+    protein = ""
+    for i in range(0, len(dna_sequence), 3):
+        codon = dna_sequence[i:i+3].upper()
+        if len(codon) == 3:
+            aa = codon_table.get(codon, 'X')
+            if aa == '*':  # Stop codon
+                break
+            protein += aa
+    
+    return protein
+
 def main(args):
     """Main function to run the evaluation."""
     # --- 1. Setup ---
@@ -117,23 +149,41 @@ def main(args):
         if "protein_sequence" in item:
             protein_sequence = item["protein_sequence"]
         else:
-            # Derive protein from merged tokens
-            protein_sequence = "".join(
-                tok.split("_")[0] for tok in item["codons"].split()
-            )
+            # Translate DNA sequence to protein sequence
+            dna_sequence = item["codons"]
+            protein_sequence = translate_dna_to_protein(dna_sequence)
 
         # --- Generate Sequences ---
         # A. Fine-tuned Model
-        output = predict_dna_sequence(
-            protein=protein_sequence,
-            organism="Escherichia coli general",
-            device=device,
-            model=finetuned_model,
-            deterministic=False,
-            temperature=0.7,
-            top_p=0.9,
-            match_protein=True,
-        )
+        try:
+            output = predict_dna_sequence(
+                protein=protein_sequence,
+                organism="Escherichia coli general",
+                device=device,
+                model=finetuned_model,
+                deterministic=True,
+                match_protein=True,
+                use_constrained_search=args.use_constrained_search,
+                gc_bounds=tuple(args.gc_bounds),
+                beam_size=args.beam_size,
+                length_penalty=args.length_penalty,
+                diversity_penalty=args.diversity_penalty,
+            )
+        except ValueError as e:
+            if "Beam rescue failed" in str(e):
+                print(f"Warning: Constrained search failed for protein {protein_sequence[:20]}... Falling back to standard generation.")
+                # Fallback to standard generation without constraints
+                output = predict_dna_sequence(
+                    protein=protein_sequence,
+                    organism="Escherichia coli general",
+                    device=device,
+                    model=finetuned_model,
+                    deterministic=True,
+                    match_protein=True,
+                    use_constrained_search=False,
+                )
+            else:
+                raise e
         if isinstance(output, list):
             finetuned_dna = output[0].predicted_dna
         else:
@@ -229,6 +279,36 @@ if __name__ == "__main__":
         type=str,
         default="results/evaluation_results.csv",
         help="Path to save the evaluation results",
+    )
+    parser.add_argument(
+        "--use_constrained_search",
+        action="store_true",
+        help="Use constrained beam search with GC bounds",
+    )
+    parser.add_argument(
+        "--gc_bounds",
+        type=float,
+        nargs=2,
+        default=[0.50, 0.54],
+        help="GC content bounds for constrained search (min max)",
+    )
+    parser.add_argument(
+        "--beam_size",
+        type=int,
+        default=10,
+        help="Beam size for constrained search",
+    )
+    parser.add_argument(
+        "--length_penalty",
+        type=float,
+        default=1.2,
+        help="Length penalty for beam search scoring",
+    )
+    parser.add_argument(
+        "--diversity_penalty",
+        type=float,
+        default=0.1,
+        help="Diversity penalty to reduce repetitive sequences",
     )
     args = parser.parse_args()
     main(args)

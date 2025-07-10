@@ -226,3 +226,4 @@ cuda_installer.pyz
 ehthumbs.db
 Thumbs.db
 research/
+models/alm-enhanced-training/balanced_alm_finetune.ckpt

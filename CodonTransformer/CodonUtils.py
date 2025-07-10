@@ -155,7 +155,7 @@ INDEX2TOKEN: Dict[int, str] = {i: c for c, i in TOKEN2INDEX.items()}
 
 # Dictionary mapping each codon to its GC content
 CODON_GC_CONTENT: Dict[str, int] = {
-    token.split("_")[1]: token.split("_")[1].count("G") + token.split("_")[1].count("C")
+    token.split("_")[1]: token.split("_")[1].upper().count("G") + token.split("_")[1].upper().count("C")
     for token in TOKEN2INDEX
     if "_" in token and len(token.split("_")[1]) == 3
 }
@@ -164,8 +164,9 @@ CODON_GC_CONTENT: Dict[str, int] = {
 GC_COUNTS_PER_TOKEN = torch.zeros(len(TOKEN2INDEX))
 for token, index in TOKEN2INDEX.items():
     if "_" in token and len(token.split("_")[1]) == 3:
-        codon = token.split("_")[1]
-        GC_COUNTS_PER_TOKEN[index] = CODON_GC_CONTENT[codon]
+        codon = token.split("_")[1].upper()
+        gc_count = codon.count("G") + codon.count("C")
+        GC_COUNTS_PER_TOKEN[index] = gc_count
 
 G_indices = [idx for token, idx in TOKEN2INDEX.items() if "g" in token.split("_")[-1]]
 C_indices = [idx for token, idx in TOKEN2INDEX.items() if "c" in token.split("_")[-1]]
@@ -178,6 +179,24 @@ AMINO_ACID_TO_INDEX = {
     for aa in (AMINO_ACIDS + STOP_SYMBOLS)
 }
 
+
+# Dictionary mapping each amino acid to min/max GC content across all possible codons
+AA_MIN_GC: Dict[str, int] = {}
+AA_MAX_GC: Dict[str, int] = {}
+
+for aa, token_indices in AMINO_ACID_TO_INDEX.items():
+    if token_indices:  # Skip if no tokens for this amino acid
+        gc_counts = []
+        for token_idx in token_indices:
+            token = INDEX2TOKEN[token_idx]
+            if "_" in token and len(token.split("_")[1]) == 3:
+                codon = token.split("_")[1]
+                if codon in CODON_GC_CONTENT:
+                    gc_counts.append(CODON_GC_CONTENT[codon])
+        
+        if gc_counts:
+            AA_MIN_GC[aa] = min(gc_counts)
+            AA_MAX_GC[aa] = max(gc_counts)
 
 # Mask token mapping
 TOKEN2MASK: Dict[int, int] = {
