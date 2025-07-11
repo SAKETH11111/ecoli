@@ -20,12 +20,19 @@ def main():
     parent_dir = script_dir.parent
     sys.path.insert(0, str(parent_dir))
 
-    # Set working directory to script directory
-    os.chdir(script_dir)
+    # Set working directory to parent directory so model paths work correctly
+    os.chdir(parent_dir)
 
     print("🧬 Starting CodonTransformer GUI...")
-    print(f"   Working directory: {script_dir}")
+    print(f"   Working directory: {parent_dir}")
     print(f"   Python path includes: {parent_dir}")
+
+    # Check for model checkpoint
+    model_path = parent_dir / "models" / "alm-enhanced-training" / "balanced_alm_finetune.ckpt"
+    if model_path.exists():
+        print(f"✅ Found fine-tuned model: {model_path}")
+    else:
+        print("⚠️  Fine-tuned model not found, will use base model")
 
     # Check for virtual environment
     venv_path = parent_dir / "codon_env"
@@ -79,10 +86,10 @@ def main():
     # Launch streamlit
     try:
         subprocess.run([
-            python_executable, "-m", "streamlit", "run", "app.py",
+            python_executable, "-m", "streamlit", "run", "streamlit_gui/app.py",
             "--server.headless", "false",
             "--server.port", "8501",
-            "--server.address", "localhost"
+            "--server.address", "0.0.0.0"
         ])
     except KeyboardInterrupt:
         print("\n👋 Shutting down CodonTransformer GUI...")

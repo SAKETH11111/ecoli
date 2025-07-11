@@ -15,6 +15,7 @@
 - [Use Case](#use-case)
 - [Installation](#installation)
 - [Finetuning](#finetuning-codontransformer)
+- [Evaluation](#evaluation)
 - [Key Features](#key-features)
   - [CodonData](#codondata)
   - [CodonPrediction](#codonprediction)
@@ -176,24 +177,68 @@ To finetune CodonTransformer on your own data, follow these steps:
 <br>
 
 3. **Run the finetuning script**
-   Execute finetune.py with appropriate arguments: (an example)
-    ```bash
-     python finetune.py \
-        --dataset_dir 'your_dataset_directory/training_data.json' \
-        --checkpoint_dir 'your_checkpoint_directory' \
-        --checkpoint_filename 'finetune.ckpt' \
-        --batch_size 6 \
-        --max_epochs 15 \
-        --num_workers 5 \
-        --accumulate_grad_batches 1 \
-        --num_gpus 4 \
-        --learning_rate 0.00005 \
-        --warmup_fraction 0.1 \
-        --save_every_n_steps 512 \
-        --seed 23
-    ```
+
+   To reproduce the high-performing `balanced_alm_finetune.ckpt` model, which uses an advanced Augmented-Lagrangian Method (ALM) for superior GC content control, use the following command.
+
+   ```bash
+   python finetune.py \
+       --dataset_dir data \
+       --checkpoint_dir models/alm-enhanced-training/ \
+       --checkpoint_filename balanced_alm_finetune.ckpt \
+       --batch_size 6 \
+       --max_epochs 15 \
+       --num_workers 5 \
+       --accumulate_grad_batches 1 \
+       --num_gpus 4 \
+       --learning_rate 0.00005 \
+       --warmup_fraction 0.1 \
+       --save_every_n_steps 512 \
+       --seed 123 \
+       --use_lagrangian \
+       --gc_target 0.52 \
+       --alm_tolerance 1e-5 \
+       --alm_dual_tolerance 1e-5 \
+       --alm_penalty_update_factor 10.0 \
+       --alm_initial_penalty_factor 20.0 \
+       --alm_tolerance_update_factor 0.1 \
+       --alm_rel_penalty_increase_threshold 0.1 \
+       --alm_max_penalty 1e6 \
+       --alm_min_penalty 1e-6
+   ```
    This script automatically loads the pretrained model from Hugging Face and finetunes it on your dataset.
    For an example of a SLURM job request, see the `slurm` directory in the repository.
+<br></br>
+
+## Evaluation
+
+This repository includes robust scripts for evaluating and comparing different codon optimization strategies.
+
+### Comprehensive Comparison
+
+To run a comprehensive comparison between the base CodonTransformer model, a fine-tuned model, and the naive High-Frequency Codon (HFC) baseline, use the `run_full_comparison.py` script.
+
+```bash
+python run_full_comparison.py \
+    --checkpoint_path models/alm-enhanced-training/balanced_alm_finetune.ckpt \
+    --output_path results/evaluation_results.csv \
+    --max_test_proteins 100
+```
+
+This will generate a `evaluation_results.csv` file with detailed metrics for each method.
+
+### Analysis and Visualization
+
+Once the evaluation is complete, you can generate a full suite of plots, statistical analyses, and summary reports using the `analyze_results.py` script.
+
+```bash
+python analyze_results.py
+```
+
+This will read `results/evaluation_results.csv` and save numerous plots (e.g., `cai_comparison.png`, `gc_content_distribution.png`) and a `evaluation_summary.json` file in the `results/` directory.
+
+### Advanced Evaluation
+
+For more advanced use cases, such as evaluating DNAChisel post-processing, Pareto filtering, and other enhanced generation techniques, use the `evaluate_optimizer.py` script. This script supports ablation studies to measure the impact of each optimization component.
 <br></br>
 
 ## Handling Ambiguous Amino Acids
@@ -688,4 +733,3 @@ If you use CodonTransformer or our data in your research, please cite our work:
   pages={3205},
   language={en}
 }
-```

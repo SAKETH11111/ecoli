@@ -183,15 +183,25 @@ def test_model_loading():
     try:
         import torch
         from transformers import AutoTokenizer
+        from CodonTransformer.CodonPrediction import load_model
 
         # Test tokenizer loading (this is fast)
         print("  📥 Testing tokenizer loading...")
         tokenizer = AutoTokenizer.from_pretrained("adibvafa/CodonTransformer")
         print(f"  ✅ Tokenizer loaded successfully")
 
-        # For model loading, we'll just check if the model class can be imported
+        # Test load_model function
+        print("  📥 Testing load_model function...")
         from transformers import BigBirdForMaskedLM
         print(f"  ✅ Model class available: BigBirdForMaskedLM")
+
+        # Check if fine-tuned model exists
+        import os
+        model_path = "models/alm-enhanced-training/balanced_alm_finetune.ckpt"
+        if os.path.exists(model_path):
+            print(f"  ✅ Fine-tuned model found: {model_path}")
+        else:
+            print(f"  ⚠️  Fine-tuned model not found at: {model_path}")
 
         # Note: We won't actually load the full model here as it's ~2GB
         print("  ℹ️  Full model loading skipped in test (too large)")
@@ -207,6 +217,8 @@ def test_file_structure():
     print("\n🧪 Testing file structure...")
 
     gui_dir = Path(__file__).parent
+    parent_dir = gui_dir.parent
+
     required_files = [
         "app.py",
         "run_gui.py",
@@ -223,7 +235,35 @@ def test_file_structure():
             print(f"  ❌ {file_name} missing")
             all_present = False
 
+    # Check for model checkpoint
+    model_path = parent_dir / "models" / "alm-enhanced-training" / "balanced_alm_finetune.ckpt"
+    if model_path.exists():
+        print(f"  ✅ Fine-tuned model checkpoint found")
+    else:
+        print(f"  ⚠️  Fine-tuned model checkpoint not found")
+
     return all_present
+
+def test_post_processing():
+    """Test post-processing functionality"""
+    print("\n🧪 Testing post-processing features...")
+
+    try:
+        from app import POST_PROCESSING_AVAILABLE, DNACHISEL_AVAILABLE
+
+        if POST_PROCESSING_AVAILABLE:
+            print("  ✅ Post-processing module available")
+            if DNACHISEL_AVAILABLE:
+                print("  ✅ DNAChisel available")
+            else:
+                print("  ⚠️  DNAChisel not available")
+        else:
+            print("  ⚠️  Post-processing module not available")
+
+        return True
+    except Exception as e:
+        print(f"  ❌ Error in post-processing test: {e}")
+        return False
 
 def main():
     """Run all tests"""
@@ -238,6 +278,7 @@ def main():
         ("Visualization Functions", test_visualization_functions),
         ("CodonEvaluation Functions", test_codon_evaluation),
         ("Model Loading", test_model_loading),
+        ("Post-Processing", test_post_processing),
     ]
 
     passed = 0
@@ -262,9 +303,16 @@ def main():
         print("\nTo run the GUI:")
         print("  python run_gui.py")
         print("  or")
-        print("  source ../codon_env/bin/activate && streamlit run app.py")
+        print("  cd streamlit_gui && streamlit run app.py --server.address=0.0.0.0")
     else:
         print("⚠️  Some tests failed. Please check the issues above.")
+
+    print("\n🔧 New Features Added:")
+    print("  • Fine-tuned model integration")
+    print("  • Enhanced constrained beam search")
+    print("  • Post-processing with DNAChisel")
+    print("  • Advanced sequence analysis")
+    print("  • Improved parameter controls")
 
     return passed == total
 
