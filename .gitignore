@@ -199,6 +199,7 @@ test_set_validation.csv
 *.json
 *.fasta
 *.fa
+*.ckpt
 
 # Results and outputs
 results/
@@ -226,3 +227,4 @@ cuda_installer.pyz
 ehthumbs.db
 Thumbs.db
 research/
+models/alm-enhanced-training/balanced_alm_finetune.ckpt

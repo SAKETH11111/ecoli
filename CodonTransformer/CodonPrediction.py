@@ -7,6 +7,8 @@ helper functions related to processing data for passing to the model.
 
 import warnings
 from typing import Any, Dict, List, Optional, Tuple, Union
+import heapq
+from dataclasses import dataclass
 
 import numpy as np
 import onnxruntime as rt
@@ -28,6 +30,10 @@ from CodonTransformer.CodonUtils import (
     ORGANISM2ID,
     TOKEN2INDEX,
     DNASequencePrediction,
+    GC_COUNTS_PER_TOKEN,
+    CODON_GC_CONTENT,
+    AA_MIN_GC,
+    AA_MAX_GC,
 )
 
 
@@ -43,6 +49,11 @@ def predict_dna_sequence(
     top_p: float = 0.95,
     num_sequences: int = 1,
     match_protein: bool = False,
+    use_constrained_search: bool = False,
+    gc_bounds: Tuple[float, float] = (0.30, 0.70),
+    beam_size: int = 5,
+    length_penalty: float = 1.0,
+    diversity_penalty: float = 0.0,
 ) -> Union[DNASequencePrediction, List[DNASequencePrediction]]:
     """
     Predict the DNA sequence(s) for a given protein using the CodonTransformer model.
@@ -88,6 +99,15 @@ def predict_dna_sequence(
         match_protein (bool, optional): Ensures the predicted DNA sequence is translated
             to the input protein sequence by sampling from only the respective codons of
             given amino acids. Defaults to False.
+        use_constrained_search (bool, optional): Whether to use constrained beam search
+            with GC content bounds. Defaults to False.
+        gc_bounds (Tuple[float, float], optional): GC content bounds (min, max) for
+            constrained search. Defaults to (0.30, 0.70).
+        beam_size (int, optional): Beam size for constrained search. Defaults to 5.
+        length_penalty (float, optional): Length penalty for beam search scoring.
+            Defaults to 1.0.
+        diversity_penalty (float, optional): Diversity penalty to reduce repetitive
+            sequences. Defaults to 0.0.
 
     Returns:
         Union[DNASequencePrediction, List[DNASequencePrediction]]: An object or list of objects
@@ -138,6 +158,20 @@ def predict_dna_sequence(
         ...     deterministic=True
         ... )
         >>>
+        >>> # Predict DNA sequence with constrained beam search
+        >>> output_constrained = predict_dna_sequence(
+        ...     protein=protein,
+        ...     organism=organism,
+        ...     device=device,
+        ...     tokenizer=tokenizer,
+        ...     model=model,
+        ...     use_constrained_search=True,
+        ...     gc_bounds=(0.40, 0.60),
+        ...     beam_size=10,
+        ...     length_penalty=1.2,
+        ...     diversity_penalty=0.1
+        ... )
+        >>>
         >>> # Predict multiple DNA sequences with low randomness and top_p sampling
         >>> output_random = predict_dna_sequence(
         ...     protein=protein,
@@ -169,10 +203,26 @@ def predict_dna_sequence(
 
     if not isinstance(num_sequences, int) or num_sequences < 1:
         raise ValueError("num_sequences must be a positive integer.")
+    
+    if use_constrained_search:
+        if not isinstance(gc_bounds, tuple) or len(gc_bounds) != 2:
+            raise ValueError("gc_bounds must be a tuple of (min_gc, max_gc).")
+        
+        if not (0.0 <= gc_bounds[0] <= gc_bounds[1] <= 1.0):
+            raise ValueError("gc_bounds must be between 0.0 and 1.0 with min <= max.")
+        
+        if not isinstance(beam_size, int) or beam_size < 1:
+            raise ValueError("beam_size must be a positive integer.")
 
-    if deterministic and num_sequences > 1:
+    if deterministic and num_sequences > 1 and not use_constrained_search:
         raise ValueError(
-            "Multiple sequences can only be generated in non-deterministic mode."
+            "Multiple sequences can only be generated in non-deterministic mode "
+            "(unless using constrained search)."
+        )
+    
+    if use_constrained_search and num_sequences > 1:
+        raise ValueError(
+            "Constrained beam search currently supports only single sequence generation."
         )
 
     # Load tokenizer
@@ -225,7 +275,15 @@ def predict_dna_sequence(
         predictions = []
         for _ in range(num_sequences):
             # Decode the predicted DNA sequence from the model output
-            if deterministic:
+            if use_constrained_search:
+                # Use constrained beam search with GC bounds
+                predicted_indices = constrained_beam_search_simple(
+                    logits=logits.squeeze(0),
+                    protein_sequence=protein,
+                    gc_bounds=gc_bounds,
+                    max_attempts=50,
+                )
+            elif deterministic:
                 predicted_indices = logits.argmax(dim=-1).squeeze().tolist()
             else:
                 predicted_indices = sample_non_deterministic(
@@ -247,6 +305,454 @@ def predict_dna_sequence(
             )
 
     return predictions[0] if num_sequences == 1 else predictions
+
+
+@dataclass
+class BeamCandidate:
+    """Represents a candidate sequence in the beam search."""
+    tokens: List[int]
+    score: float
+    gc_count: int
+    length: int
+    
+    def __post_init__(self):
+        self.gc_ratio = self.gc_count / max(self.length, 1)
+    
+    def __lt__(self, other):
+        return self.score < other.score
+
+
+def _calculate_true_future_gc_range(
+    current_pos: int, 
+    protein_sequence: str, 
+    current_gc_count: int, 
+    current_length: int
+) -> Tuple[float, float]:
+    """
+    Calculate the true minimum and maximum possible final GC content 
+    given current state and remaining amino acids (perfect foresight).
+    
+    Args:
+        current_pos: Current position in protein sequence
+        protein_sequence: Full protein sequence
+        current_gc_count: Current GC count in partial sequence
+        current_length: Current length in nucleotides
+        
+    Returns:
+        Tuple of (min_possible_final_gc_ratio, max_possible_final_gc_ratio)
+    """
+    if current_pos >= len(protein_sequence):
+        # Already at end, return current ratio
+        final_ratio = current_gc_count / max(current_length, 1)
+        return final_ratio, final_ratio
+    
+    # Calculate remaining amino acids
+    remaining_aas = protein_sequence[current_pos:]
+    
+    # Calculate min/max possible GC from remaining amino acids
+    min_future_gc = 0
+    max_future_gc = 0
+    
+    for aa in remaining_aas:
+        if aa.upper() in AA_MIN_GC and aa.upper() in AA_MAX_GC:
+            min_future_gc += AA_MIN_GC[aa.upper()]
+            max_future_gc += AA_MAX_GC[aa.upper()]
+        else:
+            # If amino acid not found, assume moderate GC (1-2 range)
+            min_future_gc += 1
+            max_future_gc += 2
+    
+    # Calculate final sequence length
+    final_length = current_length + len(remaining_aas) * 3
+    
+    # Calculate min/max possible final GC ratios
+    min_final_gc_ratio = (current_gc_count + min_future_gc) / final_length
+    max_final_gc_ratio = (current_gc_count + max_future_gc) / final_length
+    
+    return min_final_gc_ratio, max_final_gc_ratio
+
+
+def constrained_beam_search_simple(
+    logits: torch.Tensor,
+    protein_sequence: str,
+    gc_bounds: Tuple[float, float] = (0.30, 0.70),
+    max_attempts: int = 100,
+) -> List[int]:
+    """
+    Simple constrained search - try multiple greedy samples and pick best one within GC bounds.
+    """
+    min_gc, max_gc = gc_bounds
+    seq_len = min(logits.shape[0], len(protein_sequence))
+    
+    # Convert to probabilities
+    probs = torch.softmax(logits, dim=-1)
+    
+    valid_sequences = []
+    
+    for attempt in range(max_attempts):
+        tokens = []
+        total_gc = 0
+        
+        # Generate sequence position by position
+        for pos in range(seq_len):
+            aa = protein_sequence[pos]
+            possible_tokens = AMINO_ACID_TO_INDEX.get(aa, [])
+            
+            if not possible_tokens:
+                continue
+                
+            # Filter tokens by current constraints and get probabilities
+            candidates = []
+            for token_idx in possible_tokens:
+                if token_idx < len(probs[pos]) and token_idx < len(GC_COUNTS_PER_TOKEN):
+                    prob = probs[pos][token_idx].item()
+                    gc_contribution = int(GC_COUNTS_PER_TOKEN[token_idx].item())
+                    
+                    # Check if this token could still lead to a valid final sequence (perfect foresight)
+                    new_gc_total = total_gc + gc_contribution
+                    new_length = (pos + 1) * 3
+                    
+                    # Calculate what's possible for the final sequence given this choice
+                    min_final_gc, max_final_gc = _calculate_true_future_gc_range(
+                        pos + 1, protein_sequence, new_gc_total, new_length
+                    )
+                    
+                    # Only prune if there's NO OVERLAP between possible final range and target bounds
+                    if max_final_gc >= min_gc and min_final_gc <= max_gc:
+                        # Calculate gentle GC penalty to steer toward target center
+                        target_gc = (min_gc + max_gc) / 2  # Target center (e.g., 0.50 for bounds 0.45-0.55)
+                        current_projected_gc = (min_final_gc + max_final_gc) / 2  # Projected center
+                        
+                        # Only apply penalty if we're significantly off-target AND late in sequence
+                        sequence_progress = (pos + 1) / seq_len
+                        if sequence_progress > 0.3:  # Only apply penalty after 30% of sequence
+                            gc_deviation = abs(current_projected_gc - target_gc)
+                            if gc_deviation > 0.05:  # Only if >5% deviation from target
+                                # Gentle penalty: reduce probability by small factor
+                                penalty_factor = max(0.7, 1.0 - 0.3 * gc_deviation)  # 0.7-1.0 range
+                                prob = prob * penalty_factor
+                        
+                        candidates.append((token_idx, prob, gc_contribution))
+            
+            if not candidates:
+                # If no valid candidates, break and try next attempt
+                break
+                
+            # Sample from valid candidates (with temperature)
+            if attempt == 0:
+                # First attempt: greedy (highest probability)
+                best_token = max(candidates, key=lambda x: x[1])
+            else:
+                # Other attempts: sample with some randomness
+                probs_list = [c[1] for c in candidates]
+                if sum(probs_list) > 0:
+                    # Normalize probabilities
+                    probs_array = np.array(probs_list)
+                    probs_array = probs_array / probs_array.sum()
+                    # Sample
+                    chosen_idx = np.random.choice(len(candidates), p=probs_array)
+                    best_token = candidates[chosen_idx]
+                else:
+                    best_token = candidates[0]
+            
+            tokens.append(best_token[0])
+            total_gc += best_token[2]
+        
+        # Check if we got a complete sequence
+        if len(tokens) == seq_len:
+            final_gc_ratio = total_gc / (seq_len * 3)
+            if min_gc <= final_gc_ratio <= max_gc:
+                # Calculate sequence score (sum of log probabilities)
+                score = sum(np.log(probs[i][tokens[i]].item() + 1e-8) for i in range(len(tokens)))
+                valid_sequences.append((tokens, score, final_gc_ratio))
+    
+    if not valid_sequences:
+        raise ValueError(f"Could not generate valid sequence within GC bounds {gc_bounds} after {max_attempts} attempts")
+    
+    # Return the sequence with highest score
+    best_sequence = max(valid_sequences, key=lambda x: x[1])
+    return best_sequence[0]
+
+
+def constrained_beam_search(
+    logits: torch.Tensor,
+    protein_sequence: str,
+    gc_bounds: Tuple[float, float] = (0.30, 0.70),
+    beam_size: int = 5,
+    length_penalty: float = 1.0,
+    diversity_penalty: float = 0.0,
+    temperature: float = 1.0,
+    max_candidates: int = 100,
+    position_aware_gc_penalty: bool = True,
+    gc_penalty_strength: float = 2.0,
+) -> List[int]:
+    """
+    Constrained beam search with exact per-residue GC bounds tracking.
+    
+    Priority #1: Exact per-residue GC bounds tracking
+    - Tracks cumulative GC content after each codon selection
+    - Prunes candidates that would violate GC bounds
+    - Maintains beam of valid candidates
+    
+    Priority #2: Position-aware GC penalty mechanism
+    - Applies variable penalty weights based on sequence position
+    - Preserves flexibility early, applies pressure when necessary
+    - Uses progressive penalty scaling based on deviation severity
+    
+    Args:
+        logits (torch.Tensor): Model logits of shape [seq_len, vocab_size]
+        protein_sequence (str): Input protein sequence
+        gc_bounds (Tuple[float, float]): (min_gc, max_gc) bounds
+        beam_size (int): Number of candidates to maintain
+        length_penalty (float): Length penalty for scoring
+        diversity_penalty (float): Diversity penalty for scoring
+        temperature (float): Temperature for probability scaling
+        max_candidates (int): Maximum candidates to consider per position
+        position_aware_gc_penalty (bool): Whether to use position-aware GC penalties
+        gc_penalty_strength (float): Strength of GC penalty adjustment
+        
+    Returns:
+        List[int]: Best sequence token indices
+    """
+    min_gc, max_gc = gc_bounds
+    seq_len = logits.shape[0]
+    protein_len = len(protein_sequence)
+    
+    # Ensure we don't go beyond the protein sequence
+    if seq_len > protein_len:
+        print(f"Warning: logits length ({seq_len}) > protein length ({protein_len}). Truncating to protein length.")
+        seq_len = protein_len
+        logits = logits[:protein_len]
+    
+    # Initialize beam with empty candidate
+    beam = [BeamCandidate(tokens=[], score=0.0, gc_count=0, length=0)]
+    
+    # Apply temperature scaling
+    if temperature != 1.0:
+        logits = logits / temperature
+    
+    # Convert to probabilities
+    probs = torch.softmax(logits, dim=-1)
+    
+    for pos in range(min(seq_len, len(protein_sequence))):
+        # Get possible tokens for current amino acid
+        aa = protein_sequence[pos]
+        possible_tokens = AMINO_ACID_TO_INDEX.get(aa, [])
+        
+        if not possible_tokens:
+            # Fallback to all tokens if amino acid not found
+            possible_tokens = list(range(probs.shape[1]))
+        
+        # Get top candidates for this position
+        pos_probs = probs[pos]
+        top_candidates = []
+        
+        for token_idx in possible_tokens:
+            if token_idx < len(pos_probs) and token_idx < len(GC_COUNTS_PER_TOKEN):
+                prob = pos_probs[token_idx].item()
+                gc_contribution = int(GC_COUNTS_PER_TOKEN[token_idx].item())
+                # Only include tokens with valid probabilities
+                if prob > 1e-10:  # Avoid extremely low probabilities
+                    top_candidates.append((token_idx, prob, gc_contribution))
+        
+        # Sort by probability and take top max_candidates
+        top_candidates.sort(key=lambda x: x[1], reverse=True)
+        top_candidates = top_candidates[:max_candidates]
+        
+        # If no valid candidates found, fallback to all possible tokens for this amino acid
+        if not top_candidates:
+            for token_idx in possible_tokens[:min(len(possible_tokens), max_candidates)]:
+                if token_idx < len(pos_probs) and token_idx < len(GC_COUNTS_PER_TOKEN):
+                    prob = max(pos_probs[token_idx].item(), 1e-10)  # Ensure minimum probability
+                    gc_contribution = int(GC_COUNTS_PER_TOKEN[token_idx].item())
+                    top_candidates.append((token_idx, prob, gc_contribution))
+        
+        # Generate new beam candidates
+        new_beam = []
+        
+        for candidate in beam:
+            for token_idx, prob, gc_contribution in top_candidates:
+                # Calculate new GC stats
+                new_gc_count = candidate.gc_count + gc_contribution
+                new_length = candidate.length + 3  # Each codon is 3 nucleotides
+                new_gc_ratio = new_gc_count / new_length
+                
+                # Priority #2: Position-aware GC penalty mechanism
+                gc_penalty = 0.0
+                if position_aware_gc_penalty:
+                    # Calculate position weight (more penalty towards end of sequence)
+                    position_weight = (pos + 1) / seq_len
+                    
+                    # Calculate GC deviation severity
+                    target_gc = (min_gc + max_gc) / 2
+                    gc_deviation = abs(new_gc_ratio - target_gc)
+                    deviation_severity = gc_deviation / ((max_gc - min_gc) / 2)
+                    
+                    # Apply progressive penalty
+                    if deviation_severity > 0.5:  # Soft penalty zone
+                        gc_penalty = gc_penalty_strength * position_weight * (deviation_severity - 0.5) ** 2
+                    
+                    # Hard constraint: still prune sequences that exceed bounds
+                    if new_gc_ratio < min_gc or new_gc_ratio > max_gc:
+                        continue  # Prune invalid candidates
+                else:
+                    # Priority #1: Hard GC bounds only
+                    if new_gc_ratio < min_gc or new_gc_ratio > max_gc:
+                        continue  # Prune invalid candidates
+                
+                # Calculate score with GC penalty
+                new_score = candidate.score + np.log(prob + 1e-8) - gc_penalty
+                
+                # Apply length penalty
+                if length_penalty != 1.0:
+                    length_norm = ((pos + 1) ** length_penalty)
+                    normalized_score = new_score / length_norm
+                else:
+                    normalized_score = new_score
+                
+                # Create new candidate
+                new_candidate = BeamCandidate(
+                    tokens=candidate.tokens + [token_idx],
+                    score=normalized_score,
+                    gc_count=new_gc_count,
+                    length=new_length
+                )
+                
+                new_beam.append(new_candidate)
+        
+        # Apply diversity penalty if specified
+        if diversity_penalty > 0.0:
+            new_beam = _apply_diversity_penalty(new_beam, diversity_penalty)
+        
+        # Keep top beam_size candidates
+        beam = sorted(new_beam, key=lambda x: x.score, reverse=True)[:beam_size]
+        
+        # Priority #3: Adaptive beam rescue for difficult sequences
+        if not beam:
+            # Attempt beam rescue by relaxing constraints progressively
+            rescue_attempts = 0
+            max_rescue_attempts = 3
+            
+            while not beam and rescue_attempts < max_rescue_attempts:
+                rescue_attempts += 1
+                
+                # Progressive relaxation strategy
+                if rescue_attempts == 1:
+                    # First attempt: increase beam size and relax GC bounds slightly
+                    temp_beam_size = min(beam_size * 2, max_candidates)
+                    temp_gc_bounds = (min_gc * 0.95, max_gc * 1.05)
+                elif rescue_attempts == 2:
+                    # Second attempt: further relax GC bounds and increase candidates
+                    temp_beam_size = min(beam_size * 3, max_candidates)
+                    temp_gc_bounds = (min_gc * 0.9, max_gc * 1.1)
+                else:
+                    # Final attempt: maximum relaxation
+                    temp_beam_size = max_candidates
+                    temp_gc_bounds = (min_gc * 0.85, max_gc * 1.15)
+                
+                # Retry beam generation with relaxed parameters
+                rescue_beam = []
+                # Use previous beam state or start fresh if this is the first position with no beam
+                previous_beam = beam if beam else [BeamCandidate(tokens=[], score=0.0, gc_count=0, length=0)]
+                for candidate in previous_beam:
+                    for token_idx, prob, gc_contribution in top_candidates:
+                        new_gc_count = candidate.gc_count + gc_contribution
+                        new_length = candidate.length + 3
+                        new_gc_ratio = new_gc_count / new_length
+                        
+                        # Check relaxed bounds
+                        if temp_gc_bounds[0] <= new_gc_ratio <= temp_gc_bounds[1]:
+                            # Apply reduced GC penalty for rescue
+                            gc_penalty = 0.0
+                            if position_aware_gc_penalty:
+                                position_weight = (pos + 1) / seq_len
+                                target_gc = (min_gc + max_gc) / 2
+                                gc_deviation = abs(new_gc_ratio - target_gc)
+                                deviation_severity = gc_deviation / ((max_gc - min_gc) / 2)
+                                
+                                # Reduced penalty for rescue
+                                if deviation_severity > 0.7:
+                                    gc_penalty = (gc_penalty_strength * 0.5) * position_weight * (deviation_severity - 0.7) ** 2
+                            
+                            new_score = candidate.score + np.log(prob + 1e-8) - gc_penalty
+                            
+                            if length_penalty != 1.0:
+                                length_norm = ((pos + 1) ** length_penalty)
+                                normalized_score = new_score / length_norm
+                            else:
+                                normalized_score = new_score
+                            
+                            rescue_candidate = BeamCandidate(
+                                tokens=candidate.tokens + [token_idx],
+                                score=normalized_score,
+                                gc_count=new_gc_count,
+                                length=new_length
+                            )
+                            rescue_beam.append(rescue_candidate)
+                
+                # Keep top candidates from rescue attempt
+                if rescue_beam:
+                    beam = sorted(rescue_beam, key=lambda x: x.score, reverse=True)[:temp_beam_size]
+                    break
+            
+            # If all rescue attempts failed, raise error
+            if not beam:
+                raise ValueError(
+                    f"Beam rescue failed at position {pos} after {max_rescue_attempts} attempts. "
+                    f"The GC constraints {gc_bounds} may be too restrictive for this protein sequence. "
+                    f"Consider relaxing constraints or using a different approach."
+                )
+    
+    # Return best candidate
+    best_candidate = max(beam, key=lambda x: x.score)
+    return best_candidate.tokens
+
+
+# Wrapper function that tries simple approach first
+def constrained_beam_search_wrapper(
+    logits: torch.Tensor,
+    protein_sequence: str,
+    gc_bounds: Tuple[float, float] = (0.30, 0.70),
+    **kwargs
+) -> List[int]:
+    """Wrapper that tries simple approach first, falls back to complex beam search."""
+    try:
+        # Try simple approach first
+        return constrained_beam_search_simple(logits, protein_sequence, gc_bounds)
+    except ValueError:
+        # Fall back to complex beam search
+        return constrained_beam_search(logits, protein_sequence, gc_bounds, **kwargs)
+
+
+def _apply_diversity_penalty(candidates: List[BeamCandidate], penalty: float) -> List[BeamCandidate]:
+    """
+    Apply diversity penalty to reduce repetitive sequences.
+    
+    Args:
+        candidates (List[BeamCandidate]): List of candidates
+        penalty (float): Diversity penalty strength
+        
+    Returns:
+        List[BeamCandidate]: Candidates with diversity penalty applied
+    """
+    if not candidates:
+        return candidates
+    
+    # Count token occurrences
+    token_counts = {}
+    for candidate in candidates:
+        for token in candidate.tokens:
+            token_counts[token] = token_counts.get(token, 0) + 1
+    
+    # Apply penalty
+    for candidate in candidates:
+        diversity_score = 0.0
+        for token in candidate.tokens:
+            if token_counts[token] > 1:
+                diversity_score += penalty * np.log(token_counts[token])
+        candidate.score -= diversity_score
+    
+    return candidates
 
 
 def sample_non_deterministic(
