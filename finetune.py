@@ -11,6 +11,7 @@ dataset and use this script.
 
 import argparse
 import os
+import warnings
 
 import pytorch_lightning as pl
 import torch
@@ -18,6 +19,16 @@ from torch.utils.data import DataLoader
 from transformers import AutoTokenizer, BigBirdForMaskedLM, logging as hf_logging
 
 import torch.nn.functional as F
+from torch.optim.swa_utils import AveragedModel, SWALR
+
+# Try to import EMA library
+try:
+    from ema_pytorch import EMA
+    EMA_AVAILABLE = True
+except ImportError:
+    EMA_AVAILABLE = False
+    warnings.warn("ema-pytorch not available. Install with: pip install ema-pytorch")
+
 from CodonTransformer.CodonUtils import (
     C_indices,
     G_indices,
@@ -77,8 +88,9 @@ class MaskedTokenizerCollator:
 
 
 class plTrainHarness(pl.LightningModule):
-    def __init__(self, model, learning_rate, warmup_fraction, gc_penalty_weight, tokenizer, 
-                 gc_target=0.52, use_lagrangian=False, lagrangian_rho=10.0, curriculum_epochs=3):
+    def __init__(self, model, learning_rate, warmup_fraction, gc_penalty_weight, tokenizer,
+                     gc_target=0.52, use_lagrangian=False, lagrangian_rho=10.0, curriculum_epochs=3, weight_decay=0.01,
+                     use_swa=False, swa_start_epoch=10, swa_lr=0.01, use_ema=False, ema_decay=0.9999):
         super().__init__()
         self.model = model
         self.learning_rate = learning_rate
@@ -91,12 +103,34 @@ class plTrainHarness(pl.LightningModule):
         self.use_lagrangian = use_lagrangian
         self.lagrangian_rho = lagrangian_rho
         self.curriculum_epochs = curriculum_epochs
+        self.weight_decay = weight_decay
+        
+        # SWA and EMA parameters
+        self.use_swa = use_swa
+        self.swa_start_epoch = swa_start_epoch
+        self.swa_lr = swa_lr
+        self.use_ema = use_ema and EMA_AVAILABLE
+        self.ema_decay = ema_decay
         
         # Initialize Lagrangian multiplier as buffer (persists across checkpoints)
         self.register_buffer("lambda_gc", torch.tensor(0.0))
         
         # Step counter for periodic lambda updates
         self.register_buffer("step_counter", torch.tensor(0))
+        
+        # Initialize SWA and EMA models
+        self.swa_model = None
+        self.swa_scheduler = None
+        self.ema_model = None
+        
+        if self.use_ema:
+            self.ema_model = EMA(
+                self.model,
+                beta=self.ema_decay,
+                update_every=1,
+                update_after_step=100,  # Start EMA after 100 steps
+            )
+            print(f"✅ EMA initialized with decay={self.ema_decay}")
         
         # Configure BigBird to use sparse attention (set once to avoid per-step prints)
         if hasattr(self.model, 'bert') and hasattr(self.model.bert, 'set_attention_type'):
@@ -135,6 +169,7 @@ class plTrainHarness(pl.LightningModule):
         optimizer = torch.optim.AdamW(
             self.model.parameters(),
             lr=self.learning_rate,
+            weight_decay=self.weight_decay
         )
         lr_scheduler = {
             "scheduler": torch.optim.lr_scheduler.OneCycleLR(
@@ -224,7 +259,56 @@ class plTrainHarness(pl.LightningModule):
             on_step=True,
             prog_bar=True,
         )
+        
+        # Update EMA model if enabled
+        if self.use_ema and self.ema_model is not None:
+            self.ema_model.update()
+        
         return total_loss
+    
+    def on_train_epoch_end(self):
+        """Handle SWA model initialization and updates."""
+        if self.use_swa and self.current_epoch >= self.swa_start_epoch:
+            if self.swa_model is None:
+                # Initialize SWA model
+                print(f"🔄 Initializing SWA model at epoch {self.current_epoch}")
+                self.swa_model = AveragedModel(self.model)
+                self.swa_scheduler = SWALR(
+                    self.trainer.optimizers[0],
+                    swa_lr=self.swa_lr,
+                    anneal_epochs=5,
+                    anneal_strategy="cos"
+                )
+                print(f"✅ SWA initialized with lr={self.swa_lr}")
+            else:
+                # Update SWA model
+                self.swa_model.update_parameters(self.model)
+                self.swa_scheduler.step()
+                print(f"📊 SWA model updated at epoch {self.current_epoch}")
+    
+    def on_train_end(self):
+        """Finalize training with SWA batch normalization update."""
+        if self.use_swa and self.swa_model is not None:
+            print("🔧 Updating SWA batch normalization statistics...")
+            # Update batch normalization statistics for SWA model
+            torch.optim.swa_utils.update_bn(
+                self.trainer.train_dataloader, self.swa_model, device=self.device
+            )
+            print("✅ SWA batch normalization updated")
+        
+        # Finalize EMA model
+        if self.use_ema and self.ema_model is not None:
+            print("✅ EMA model finalized")
+    
+    def get_swa_model(self):
+        """Get the SWA model for checkpointing."""
+        return self.swa_model
+    
+    def get_ema_model(self):
+        """Get the EMA model for checkpointing."""
+        if self.use_ema and self.ema_model is not None:
+            return self.ema_model.ema_model
+        return None
 
 
 class DumpStateDict(pl.Callback):
@@ -235,10 +319,29 @@ class DumpStateDict(pl.Callback):
         self.checkpoint_filename = checkpoint_filename
 
     def on_save_checkpoint(self, trainer, pl_module, checkpoint):
+        # Save regular model
         model = pl_module.model
         torch.save(
             model.state_dict(), os.path.join(self.dirpath, self.checkpoint_filename)
         )
+        
+        # Save SWA model if available
+        if hasattr(pl_module, 'swa_model') and pl_module.swa_model is not None:
+            swa_filename = self.checkpoint_filename.replace('.ckpt', '_swa.ckpt')
+            torch.save(
+                pl_module.swa_model.state_dict(), 
+                os.path.join(self.dirpath, swa_filename)
+            )
+            print(f"💾 SWA model saved: {swa_filename}")
+        
+        # Save EMA model if available
+        if hasattr(pl_module, 'ema_model') and pl_module.ema_model is not None:
+            ema_filename = self.checkpoint_filename.replace('.ckpt', '_ema.ckpt')
+            torch.save(
+                pl_module.ema_model.state_dict(), 
+                os.path.join(self.dirpath, ema_filename)
+            )
+            print(f"💾 EMA model saved: {ema_filename}")
 
 
 class GCValidationHook(pl.Callback):
@@ -289,11 +392,13 @@ def main(args):
 
     # Load the tokenizer and model
     tokenizer = AutoTokenizer.from_pretrained("adibvafa/CodonTransformer")
-    model = BigBirdForMaskedLM.from_pretrained("adibvafa/CodonTransformer-base")
+    model = BigBirdForMaskedLM.from_pretrained("adibvafa/CodonTransformer")
     harnessed_model = plTrainHarness(
         model, args.learning_rate, args.warmup_fraction, args.gc_penalty_weight, tokenizer,
-        gc_target=args.gc_target, use_lagrangian=args.use_lagrangian, 
-        lagrangian_rho=args.lagrangian_rho, curriculum_epochs=args.curriculum_epochs
+        gc_target=args.gc_target, use_lagrangian=args.use_lagrangian,
+        lagrangian_rho=args.lagrangian_rho, curriculum_epochs=args.curriculum_epochs,
+        weight_decay=args.weight_decay, use_swa=args.use_swa, swa_start_epoch=args.swa_start_epoch,
+        swa_lr=args.swa_lr, use_ema=args.use_ema, ema_decay=args.ema_decay
     )
 
     # Load the training data
@@ -366,10 +471,10 @@ if __name__ == "__main__":
         help="Filename for the saved checkpoint",
     )
     parser.add_argument(
-        "--batch_size", type=int, default=6, help="Batch size for training"
+        "--batch_size", type=int, default=2, help="Batch size for training"
     )
     parser.add_argument(
-        "--max_epochs", type=int, default=15, help="Maximum number of epochs to train"
+        "--max_epochs", type=int, default=20, help="Maximum number of epochs to train"
     )
     parser.add_argument(
         "--num_workers", type=int, default=3, help="Number of workers for data loading"
@@ -381,7 +486,7 @@ if __name__ == "__main__":
         help="Number of batches to accumulate gradients",
     )
     parser.add_argument(
-        "--num_gpus", type=int, default=4, help="Number of GPUs to use for training"
+        "--num_gpus", type=int, default=1, help="Number of GPUs to use for training"
     )
     parser.add_argument(
         "--learning_rate",
@@ -439,6 +544,42 @@ if __name__ == "__main__":
         type=int,
         default=20,
         help="How often to log metrics (in training steps)",
+    )
+    parser.add_argument(
+        "--weight_decay",
+        type=float,
+        default=0.01,
+        help="Weight decay for the optimizer",
+    )
+    # SWA parameters
+    parser.add_argument(
+        "--use_swa",
+        action="store_true",
+        help="Use Stochastic Weight Averaging for better generalization",
+    )
+    parser.add_argument(
+        "--swa_start_epoch",
+        type=int,
+        default=10,
+        help="Epoch to start SWA (default: 10)",
+    )
+    parser.add_argument(
+        "--swa_lr",
+        type=float,
+        default=0.01,
+        help="Learning rate for SWA (default: 0.01)",
+    )
+    # EMA parameters  
+    parser.add_argument(
+        "--use_ema",
+        action="store_true",
+        help="Use Exponential Moving Average for model stability",
+    )
+    parser.add_argument(
+        "--ema_decay",
+        type=float,
+        default=0.9999,
+        help="EMA decay rate (default: 0.9999)",
     )
     args = parser.parse_args()
     main(args)

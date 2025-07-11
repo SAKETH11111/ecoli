@@ -199,6 +199,7 @@ test_set_validation.csv
 *.json
 *.fasta
 *.fa
+*.ckpt
 
 # Results and outputs
 results/

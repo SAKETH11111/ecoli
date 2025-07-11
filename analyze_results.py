@@ -18,48 +18,65 @@ has_enc = 'enc' in results_df.columns
 has_cpb = 'cpb' in results_df.columns
 has_scuo = 'scuo' in results_df.columns
 
+# Filter to only the three key methods we want to compare
+key_methods = ['base_model', 'fine_tuned_original', 'naive_hfc']
+results_df = results_df[results_df['method'].isin(key_methods)]
+
+print("=== ANALYSIS SUMMARY ===")
+print(f"Total sequences analyzed: {len(results_df)}")
+print(f"Methods: {results_df['method'].unique()}")
+print(f"Proteins per method: {results_df.groupby('method').size()}")
 
 # 1. Codon Adaptation Index (CAI) Comparison
 plt.figure(figsize=(10, 6))
-sns.barplot(data=results_df, x='model', y='cai')
+sns.barplot(data=results_df, x='method', y='cai')
 plt.title('Codon Adaptation Index (CAI) Comparison')
 plt.ylabel('CAI Score')
-plt.xlabel('Model')
+plt.xlabel('Method')
+plt.xticks(rotation=45)
+plt.tight_layout()
 plt.savefig('results/cai_comparison.png')
 plt.close()
 
 # 2. tRNA Adaptation Index (tAI) Comparison
 plt.figure(figsize=(10, 6))
-sns.barplot(data=results_df, x='model', y='tai')
+sns.barplot(data=results_df, x='method', y='tai')
 plt.title('tRNA Adaptation Index (tAI) Comparison')
 plt.ylabel('tAI Score')
-plt.xlabel('Model')
+plt.xlabel('Method')
+plt.xticks(rotation=45)
+plt.tight_layout()
 plt.savefig('results/tai_comparison.png')
 plt.close()
 
 # 3. GC Content Analysis
 plt.figure(figsize=(10, 6))
-sns.boxplot(data=results_df, x='model', y='gc_content')
+sns.boxplot(data=results_df, x='method', y='gc_content')
 plt.title('GC Content Distribution')
 plt.ylabel('GC Content (%)')
-plt.xlabel('Model')
+plt.xlabel('Method')
 plt.ylim(40, 65)
 plt.axhline(y=45, color='r', linestyle='--', label='Healthy Range (45-60%)')
 plt.axhline(y=60, color='r', linestyle='--')
 plt.legend()
+plt.xticks(rotation=45)
+plt.tight_layout()
 plt.savefig('results/gc_content_distribution.png')
 plt.close()
 
 # 4. Sequence Health Metrics
 fig, axes = plt.subplots(1, 3, figsize=(20, 6))
-sns.barplot(data=results_df, x='model', y='restriction_sites', ax=axes[0])
+sns.barplot(data=results_df, x='method', y='restriction_sites', ax=axes[0])
 axes[0].set_title('Restriction Site Occurrences')
+axes[0].tick_params(axis='x', rotation=45)
 
-sns.barplot(data=results_df, x='model', y='neg_cis_elements', ax=axes[1])
+sns.barplot(data=results_df, x='method', y='neg_cis_elements', ax=axes[1])
 axes[1].set_title('Negative Cis-Regulatory Elements')
+axes[1].tick_params(axis='x', rotation=45)
 
-sns.barplot(data=results_df, x='model', y='homopolymer_runs', ax=axes[2])
+sns.barplot(data=results_df, x='method', y='homopolymer_runs', ax=axes[2])
 axes[2].set_title('Homopolymer Runs (>8bp)')
+axes[2].tick_params(axis='x', rotation=45)
 
 plt.tight_layout()
 plt.savefig('results/sequence_health_metrics.png')
@@ -67,84 +84,92 @@ plt.close()
 
 # 5. DTW Distance Comparison
 plt.figure(figsize=(10, 6))
-sns.barplot(data=results_df, x='model', y='dtw_distance')
+sns.barplot(data=results_df, x='method', y='dtw_distance')
 plt.title('DTW Distance from Natural %MinMax Profile')
 plt.ylabel('DTW Distance')
-plt.xlabel('Model')
+plt.xlabel('Method')
+plt.xticks(rotation=45)
+plt.tight_layout()
 plt.savefig('results/dtw_distance_comparison.png')
 plt.close()
 
 # 6. Delta CAI vs Delta DTW Scatter Plot
-pivot_df = results_df.pivot(index='protein', columns='model', values=['cai', 'dtw_distance'])
+pivot_df = results_df.pivot(index='protein_id', columns='method', values=['cai', 'dtw_distance'])
 delta_df = pd.DataFrame()
-delta_df['delta_cai'] = pivot_df[('cai', 'fine_tuned')] - pivot_df[('cai', 'base')]
-delta_df['delta_dtw'] = pivot_df[('dtw_distance', 'fine_tuned')] - pivot_df[('dtw_distance', 'base')]
 
-plt.figure(figsize=(10, 6))
-sns.scatterplot(data=delta_df, x='delta_cai', y='delta_dtw')
-plt.title('Trade-off: ΔCAI vs ΔDTW (Fine-tuned - Base)')
-plt.xlabel('CAI Improvement (ΔCAI)')
-plt.ylabel('DTW Distance Change (ΔDTW)')
-plt.grid(True)
-plt.savefig('results/delta_cai_vs_delta_dtw.png')
-plt.close()
-
+# Calculate deltas if both methods exist
+if ('cai', 'base_model') in pivot_df.columns and ('cai', 'fine_tuned_original') in pivot_df.columns:
+    delta_df['delta_cai'] = pivot_df[('cai', 'fine_tuned_original')] - pivot_df[('cai', 'base_model')]
+    delta_df['delta_dtw'] = pivot_df[('dtw_distance', 'fine_tuned_original')] - pivot_df[('dtw_distance', 'base_model')]
+    
+    plt.figure(figsize=(10, 6))
+    sns.scatterplot(data=delta_df, x='delta_cai', y='delta_dtw')
+    plt.title('Trade-off: ΔCAI vs ΔDTW (Fine-tuned - Base)')
+    plt.xlabel('CAI Improvement (ΔCAI)')
+    plt.ylabel('DTW Distance Change (ΔDTW)')
+    plt.grid(True)
+    plt.savefig('results/delta_cai_vs_delta_dtw.png')
+    plt.close()
 
 # 7. Statistical Significance Tests
-print("--- Statistical Significance Tests (Wilcoxon signed-rank) ---")
+print("\n--- Statistical Significance Tests (Wilcoxon signed-rank) ---")
 
-model_pairs = [('fine_tuned', 'base'), ('fine_tuned', 'naive_hfc'), ('base', 'naive_hfc')]
+method_pairs = [('fine_tuned_original', 'base_model'), ('fine_tuned_original', 'naive_hfc'), ('base_model', 'naive_hfc')]
 metrics = ['cai', 'tai', 'dtw_distance', 'gc_content', 'restriction_sites', 'neg_cis_elements', 'homopolymer_runs']
 
 for metric in metrics:
     print(f"\n--- Metric: {metric.upper()} ---")
-    pivot_df = results_df.pivot(index='protein', columns='model', values=metric).dropna()
-    for model1, model2 in model_pairs:
-        if model1 not in pivot_df.columns or model2 not in pivot_df.columns:
+    pivot_df = results_df.pivot(index='protein_id', columns='method', values=metric).dropna()
+    for method1, method2 in method_pairs:
+        if method1 not in pivot_df.columns or method2 not in pivot_df.columns:
             continue
             
-        m1_data = pivot_df[model1]
-        m2_data = pivot_df[model2]
+        m1_data = pivot_df[method1]
+        m2_data = pivot_df[method2]
 
         if m1_data.var() < 1e-10 or m2_data.var() < 1e-10:
-            print(f"Skipping {model1} vs. {model2} due to zero variance in one of the models.")
+            print(f"Skipping {method1} vs. {method2} due to zero variance in one of the methods.")
             continue
             
         stat, p_value = wilcoxon(m1_data, m2_data)
-        print(f"{model1} vs. {model2}: p-value = {p_value:.4f}")
+        print(f"{method1} vs. {method2}: p-value = {p_value:.4f}")
 
-# 7. Additional Plots
+# 8. Additional Plots
 # GC Content violin plot
 plt.figure(figsize=(10, 6))
-sns.violinplot(data=results_df, x='model', y='gc_content')
+sns.violinplot(data=results_df, x='method', y='gc_content')
 plt.title('GC Content Distribution (Violin Plot)')
 plt.ylabel('GC Content (%)')
-plt.xlabel('Model')
+plt.xlabel('Method')
 plt.axhline(y=45, color='r', linestyle='--', label='Healthy Range (45-60%)')
 plt.axhline(y=60, color='r', linestyle='--')
 plt.legend()
+plt.xticks(rotation=45)
+plt.tight_layout()
 plt.savefig('results/gc_content_violin.png')
 plt.close()
 
 # tAI violin plot
 plt.figure(figsize=(10, 6))
-sns.violinplot(data=results_df, x='model', y='tai')
+sns.violinplot(data=results_df, x='method', y='tai')
 plt.title('tAI Distribution (Violin Plot)')
 plt.ylabel('tAI Score')
-plt.xlabel('Model')
+plt.xlabel('Method')
+plt.xticks(rotation=45)
+plt.tight_layout()
 plt.savefig('results/tai_violin.png')
 plt.close()
 
 # CAI vs GC Content scatter plot
 plt.figure(figsize=(10, 6))
-sns.scatterplot(data=results_df, x='gc_content', y='cai', hue='model', alpha=0.7)
+sns.scatterplot(data=results_df, x='gc_content', y='cai', hue='method', alpha=0.7)
 plt.title('CAI vs. GC Content')
 plt.xlabel('GC Content (%)')
 plt.ylabel('CAI Score')
 plt.grid(True)
+plt.tight_layout()
 plt.savefig('results/cai_vs_gc_content.png')
 plt.close()
-
 
 # Enhanced Codon Usage Analysis Plots
 if has_enc:
@@ -153,29 +178,31 @@ if has_enc:
     
     # ENC comparison barplot
     plt.subplot(2, 2, 1)
-    sns.barplot(data=results_df, x='model', y='enc')
+    sns.barplot(data=results_df, x='method', y='enc')
     plt.title('Effective Number of Codons (ENC)')
     plt.ylabel('ENC Value')
     plt.axhline(y=20, color='r', linestyle='--', alpha=0.5, label='Low bias threshold')
     plt.axhline(y=40, color='orange', linestyle='--', alpha=0.5, label='Medium bias threshold')
     plt.legend()
+    plt.xticks(rotation=45)
     
     # ENC violin plot
     plt.subplot(2, 2, 2)
-    sns.violinplot(data=results_df, x='model', y='enc')
+    sns.violinplot(data=results_df, x='method', y='enc')
     plt.title('ENC Distribution (Violin Plot)')
     plt.ylabel('ENC Value')
+    plt.xticks(rotation=45)
     
     # ENC vs CAI scatter
     plt.subplot(2, 2, 3)
-    sns.scatterplot(data=results_df, x='enc', y='cai', hue='model', alpha=0.7)
+    sns.scatterplot(data=results_df, x='enc', y='cai', hue='method', alpha=0.7)
     plt.title('ENC vs CAI Relationship')
     plt.xlabel('ENC Value')
     plt.ylabel('CAI Score')
     
     # ENC vs GC content
     plt.subplot(2, 2, 4)
-    sns.scatterplot(data=results_df, x='enc', y='gc_content', hue='model', alpha=0.7)
+    sns.scatterplot(data=results_df, x='enc', y='gc_content', hue='method', alpha=0.7)
     plt.title('ENC vs GC Content')
     plt.xlabel('ENC Value')
     plt.ylabel('GC Content (%)')
@@ -190,15 +217,16 @@ if has_cpb:
     
     # CPB comparison
     plt.subplot(1, 2, 1)
-    sns.barplot(data=results_df, x='model', y='cpb')
+    sns.barplot(data=results_df, x='method', y='cpb')
     plt.title('Codon Pair Bias (CPB)')
     plt.ylabel('CPB Value')
+    plt.xticks(rotation=45)
     
     # CPB distribution
     plt.subplot(1, 2, 2)
-    sns.boxplot(data=results_df, x='model', y='cpb')
+    sns.boxplot(data=results_df, x='method', y='cpb')
     plt.title('CPB Distribution')
-    plt.ylabel('CPB Value')
+    plt.xticks(rotation=45)
     
     plt.tight_layout()
     plt.savefig('results/cpb_analysis.png')
@@ -210,158 +238,90 @@ if has_scuo:
     
     # SCUO comparison
     plt.subplot(1, 2, 1)
-    sns.barplot(data=results_df, x='model', y='scuo')
+    sns.barplot(data=results_df, x='method', y='scuo')
     plt.title('Synonymous Codon Usage Order (SCUO)')
     plt.ylabel('SCUO Value')
-    plt.axhline(y=0.5, color='r', linestyle='--', alpha=0.5, label='Random usage')
-    plt.legend()
+    plt.xticks(rotation=45)
     
-    # SCUO vs CAI relationship
+    # SCUO distribution
     plt.subplot(1, 2, 2)
-    sns.scatterplot(data=results_df, x='scuo', y='cai', hue='model', alpha=0.7)
-    plt.title('SCUO vs CAI Relationship')
-    plt.xlabel('SCUO Value')
-    plt.ylabel('CAI Score')
+    sns.boxplot(data=results_df, x='method', y='scuo')
+    plt.title('SCUO Distribution')
+    plt.xticks(rotation=45)
     
     plt.tight_layout()
     plt.savefig('results/scuo_analysis.png')
     plt.close()
 
-# Comprehensive codon usage metrics heatmap
-if has_enc and has_cpb and has_scuo:
-    # Create correlation matrix of all codon usage metrics
-    codon_metrics = ['cai', 'tai', 'enc', 'cpb', 'scuo', 'gc_content']
-    available_metrics = [m for m in codon_metrics if m in results_df.columns]
+# 9. Performance Radar Chart
+def create_radar_chart(data, methods, metrics):
+    """Create a radar chart comparing methods across multiple metrics."""
+    # Normalize metrics to 0-1 scale for radar chart
+    normalized_data = data.copy()
+    for metric in metrics:
+        if metric in normalized_data.columns:
+            min_val = normalized_data[metric].min()
+            max_val = normalized_data[metric].max()
+            if max_val > min_val:
+                normalized_data[metric] = (normalized_data[metric] - min_val) / (max_val - min_val)
     
-    if len(available_metrics) >= 3:
-        plt.figure(figsize=(10, 8))
-        
-        # Calculate correlation matrix for each model
-        for i, model in enumerate(results_df['model'].unique()):
-            model_data = results_df[results_df['model'] == model][available_metrics]
-            
-            plt.subplot(2, 2, i+1)
-            correlation_matrix = model_data.corr()
-            sns.heatmap(correlation_matrix, annot=True, cmap='coolwarm', center=0,
-                       square=True, fmt='.2f', cbar_kws={'shrink': .8})
-            plt.title(f'{model.replace("_", " ").title()} - Metric Correlations')
-        
-        plt.tight_layout()
-        plt.savefig('results/codon_metrics_correlations.png')
-        plt.close()
-
-# Multi-metric comparison radar chart
-if has_enc and has_cpb and has_scuo:
-    from math import pi
+    # Calculate mean values for each method
+    radar_data = normalized_data.groupby('method')[metrics].mean()
     
-    # Normalize metrics for radar chart (0-1 scale)
-    metrics_for_radar = ['cai', 'tai', 'enc', 'scuo']
-    available_radar_metrics = [m for m in metrics_for_radar if m in results_df.columns]
+    # Number of variables
+    N = len(metrics)
     
-    if len(available_radar_metrics) >= 3:
-        fig, axes = plt.subplots(1, len(results_df['model'].unique()), 
-                                figsize=(5*len(results_df['model'].unique()), 5),
-                                subplot_kw=dict(projection='polar'))
-        
-        if len(results_df['model'].unique()) == 1:
-            axes = [axes]
-        
-        for idx, model in enumerate(results_df['model'].unique()):
-            model_data = results_df[results_df['model'] == model]
-            
-            # Calculate mean values and normalize
-            values = []
-            for metric in available_radar_metrics:
-                if metric == 'enc':
-                    # For ENC, lower is better (more biased), so invert
-                    normalized_val = 1 - (model_data[metric].mean() / 61.0)
-                else:
-                    # For others, normalize to 0-1 scale
-                    normalized_val = model_data[metric].mean()
-                    if metric in ['cai', 'tai', 'scuo']:
-                        # These are already 0-1 scale typically
-                        pass
-                    else:
-                        # Normalize other metrics
-                        min_val = results_df[metric].min()
-                        max_val = results_df[metric].max()
-                        if max_val > min_val:
-                            normalized_val = (normalized_val - min_val) / (max_val - min_val)
-                        else:
-                            normalized_val = 0.5
-                
-                values.append(max(0, min(1, normalized_val)))  # Clamp to 0-1
-            
-            # Set up angles for radar chart
-            angles = [n / float(len(available_radar_metrics)) * 2 * pi for n in range(len(available_radar_metrics))]
-            angles += angles[:1]  # Complete the circle
+    # Create angles for each metric
+    angles = [n / float(N) * 2 * np.pi for n in range(N)]
+    angles += angles[:1]  # Complete the circle
+    
+    # Create the plot
+    fig, ax = plt.subplots(figsize=(10, 10), subplot_kw=dict(projection='polar'))
+    
+    # Plot each method
+    colors = ['red', 'blue', 'green']
+    for i, method in enumerate(methods):
+        if method in radar_data.index:
+            values = radar_data.loc[method].values.tolist()
             values += values[:1]  # Complete the circle
-            
-            # Plot
-            axes[idx].plot(angles, values, 'o-', linewidth=2, label=model)
-            axes[idx].fill(angles, values, alpha=0.25)
-            axes[idx].set_xticks(angles[:-1])
-            axes[idx].set_xticklabels([m.upper() for m in available_radar_metrics])
-            axes[idx].set_ylim(0, 1)
-            axes[idx].set_title(f'{model.replace("_", " ").title()} Performance Profile')
-            axes[idx].grid(True)
-        
-        plt.tight_layout()
-        plt.savefig('results/performance_radar_charts.png')
-        plt.close()
+            ax.plot(angles, values, 'o-', linewidth=2, label=method, color=colors[i])
+            ax.fill(angles, values, alpha=0.25, color=colors[i])
+    
+    # Set labels
+    ax.set_xticks(angles[:-1])
+    ax.set_xticklabels(metrics)
+    ax.set_ylim(0, 1)
+    ax.set_title('Performance Comparison Radar Chart', size=20, y=1.1)
+    ax.legend(loc='upper right', bbox_to_anchor=(1.3, 1.0))
+    
+    plt.tight_layout()
+    plt.savefig('results/performance_radar_charts.png')
+    plt.close()
 
-# 8. Save Summary Data to JSON
-p_values_dict = {}
-# Update metrics list to include new ones
-extended_metrics = metrics.copy()
+# Create radar chart for key metrics
+key_metrics = ['cai', 'tai', 'gc_content', 'restriction_sites', 'neg_cis_elements', 'homopolymer_runs']
+create_radar_chart(results_df, key_methods, key_metrics)
+
+# 10. Summary Statistics
+print("\n=== SUMMARY STATISTICS ===")
+summary_stats = results_df.groupby('method')[['cai', 'tai', 'gc_content', 'restriction_sites', 'neg_cis_elements', 'homopolymer_runs']].agg(['mean', 'std']).round(4)
+print(summary_stats)
+
+print("\n=== ANALYSIS COMPLETE ===")
+print("Generated plots saved in results/ directory:")
+print("- cai_comparison.png")
+print("- tai_comparison.png") 
+print("- gc_content_distribution.png")
+print("- sequence_health_metrics.png")
+print("- dtw_distance_comparison.png")
+print("- delta_cai_vs_delta_dtw.png")
+print("- gc_content_violin.png")
+print("- tai_violin.png")
+print("- cai_vs_gc_content.png")
+print("- performance_radar_charts.png")
 if has_enc:
-    extended_metrics.append('enc')
+    print("- enc_analysis.png")
 if has_cpb:
-    extended_metrics.append('cpb')
+    print("- cpb_analysis.png")
 if has_scuo:
-    extended_metrics.append('scuo')
-
-for metric in extended_metrics:
-    if metric not in results_df.columns:
-        continue
-    p_values_dict[metric] = {}
-    pivot_df = results_df.pivot(index='protein', columns='model', values=metric).dropna()
-    for model1, model2 in model_pairs:
-        if model1 not in pivot_df.columns or model2 not in pivot_df.columns:
-            continue
-        m1_data = pivot_df[model1]
-        m2_data = pivot_df[model2]
-        if m1_data.var() < 1e-10 or m2_data.var() < 1e-10:
-            p_values_dict[metric][f"{model1}_vs_{model2}"] = 'skipped (zero variance)'
-            continue
-        stat, p_value = wilcoxon(m1_data, m2_data)
-        p_values_dict[metric][f"{model1}_vs_{model2}"] = p_value
-
-summary_data = {
-    "mean_metrics": results_df.groupby('model')[extended_metrics].mean().to_dict(),
-    "statistical_tests": p_values_dict,
-    "new_metrics_available": {
-        "enc": has_enc,
-        "cpb": has_cpb,
-        "scuo": has_scuo
-    }
-}
-import json
-with open("results/evaluation_summary.json", "w") as f:
-    json.dump(summary_data, f, indent=4)
-
-print("\nAnalysis complete. Plots and summary JSON saved to the 'results' directory.")
-if has_enc or has_cpb or has_scuo:
-    print("\nEnhanced codon usage analysis plots generated:")
-    if has_enc:
-        print("  ✓ ENC (Effective Number of Codons) analysis")
-    if has_cpb:
-        print("  ✓ CPB (Codon Pair Bias) analysis")
-    if has_scuo:
-        print("  ✓ SCUO (Synonymous Codon Usage Order) analysis")
-    if has_enc and has_cpb and has_scuo:
-        print("  ✓ Comprehensive codon metrics correlation heatmaps")
-        print("  ✓ Multi-metric performance radar charts")
-else:
-    print("\nNote: Enhanced codon usage metrics (ENC, CPB, SCUO) not found in results.")
-    print("Run the evaluation pipeline with updated CodonEvaluation.py to generate these metrics.")
+    print("- scuo_analysis.png")
