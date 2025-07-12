@@ -33,6 +33,11 @@ The genetic code is degenerate allowing a multitude of possible DNA sequences to
 
 ## Use Case
 **For a user-friendly interface, check out our [Google Colab Notebook.](https://adibvafa.github.io/CodonTransformer/GoogleColab)**
+
+**🆕 Enhanced E. coli Model**: We've released a fine-tuned model specifically for E. coli optimization: [`saketh11/ColiFormer`](https://huggingface.co/saketh11/ColiFormer) - providing 6.2% better CAI scores!
+
+**📊 Training Dataset**: The complete training and evaluation dataset is available at [`saketh11/ColiFormer-Data`](https://huggingface.co/datasets/saketh11/ColiFormer-Data) including 4,300 high-CAI E. coli sequences and 50,000+ reference genes for metrics calculation.
+
 <br></br>
 After installing CodonTransformer, you can use:
 
