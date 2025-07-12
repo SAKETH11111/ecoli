@@ -15,4 +15,6 @@ biopython>=1.79
 scikit-learn>=1.0.0
 requests>=2.25.0
 ipywidgets>=7.6.0
+huggingface-hub>=0.20.0
+datasets>=2.0.0
 git+https://github.com/Benjamin-Lee/CodonAdaptationIndex.git

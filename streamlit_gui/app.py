@@ -5,6 +5,8 @@ import numpy as np
 import plotly.graph_objects as go
 import plotly.express as px
 from transformers import AutoTokenizer, BigBirdForMaskedLM
+from huggingface_hub import hf_hub_download
+from datasets import load_dataset
 import time
 import threading
 from typing import Dict, Optional, Tuple
@@ -98,20 +100,31 @@ def load_model_and_tokenizer():
             progress_bar.progress(25)
             st.session_state.tokenizer = AutoTokenizer.from_pretrained("adibvafa/CodonTransformer")
 
-            status_text.text("Loading fine-tuned model...")
+            status_text.text("Loading fine-tuned model from Hugging Face...")
             progress_bar.progress(50)
-            # Load fine-tuned model by default, fallback to base model
-            model_path = "models/alm-enhanced-training/balanced_alm_finetune.ckpt"
+            # Try to download and load fine-tuned model from Hugging Face
             try:
+                # Download the checkpoint file from Hugging Face
+                from huggingface_hub import hf_hub_download
+                
+                status_text.text("⬇️ Downloading model from saketh11/ColiFormer...")
+                model_path = hf_hub_download(
+                    repo_id="saketh11/ColiFormer",
+                    filename="balanced_alm_finetune.ckpt",
+                    cache_dir="./hf_cache"
+                )
+                
+                status_text.text("🔄 Loading downloaded model...")
                 st.session_state.model = load_model(
                     model_path=model_path,
                     device=st.session_state.device,
                     attention_type="original_full"
                 )
-                status_text.text("✅ Fine-tuned model loaded (6.2% better CAI)")
-                st.session_state.model_type = "fine_tuned"
+                status_text.text("✅ Fine-tuned model loaded from Hugging Face (6.2% better CAI)")
+                st.session_state.model_type = "fine_tuned_hf"
             except Exception as e:
-                status_text.text("Fine-tuned model not found, loading base model...")
+                status_text.text(f"⚠️ Failed to load from Hugging Face: {str(e)[:50]}...")
+                status_text.text("Loading base model as fallback...")
                 st.session_state.model = BigBirdForMaskedLM.from_pretrained("adibvafa/CodonTransformer")
                 st.session_state.model = st.session_state.model.to(st.session_state.device)
                 st.session_state.model_type = "base"
@@ -122,33 +135,65 @@ def load_model_and_tokenizer():
             status_text.empty()
             progress_bar.empty()
 
+@st.cache_data
+def download_reference_data():
+    """Download and cache reference data from Hugging Face"""
+    try:
+        # Download the processed genes file from Hugging Face
+        file_path = hf_hub_download(
+            repo_id="saketh11/ColiFormer-Data",
+            filename="ecoli_processed_genes.csv",
+            repo_type="dataset"
+        )
+        df = pd.read_csv(file_path)
+        return df['dna_sequence'].tolist()
+    except Exception as e:
+        st.warning(f"Could not download reference data from Hugging Face: {e}")
+        # Fallback to minimal sequences
+        return [
+            "ATGGCGAAAGCGCTGTATCGCGAAAGCGCTGTATCGCGAAAGCGCTGTATCGC",
+            "ATGAAATTTATTTATTATTATAAATTTATTTATTATTATAAATTTATTTAT",
+            "ATGGGTCGTCGTCGTCGTGGTCGTCGTCGTCGTGGTCGTCGTCGTCGTGGT"
+        ]
+
+@st.cache_data
+def download_tai_weights():
+    """Download and cache tAI weights from Hugging Face"""
+    try:
+        # Download the tAI weights file from Hugging Face
+        file_path = hf_hub_download(
+            repo_id="saketh11/ColiFormer-Data",
+            filename="organism_tai_weights.json",
+            repo_type="dataset"
+        )
+        with open(file_path, 'r') as f:
+            all_weights = json.load(f)
+        return all_weights.get("Escherichia coli general", get_ecoli_tai_weights())
+    except Exception as e:
+        st.warning(f"Could not download tAI weights from Hugging Face: {e}")
+        return get_ecoli_tai_weights()
+
 def load_reference_data(organism: str = "Escherichia coli general"):
-    """Load reference sequences and tAI weights for E. coli only (original logic)"""
+    """Load reference sequences and tAI weights for E. coli"""
     if 'cai_weights' not in st.session_state or st.session_state['cai_weights'] is None:
         try:
-            # Use the original E. coli reference file
-            reference_file = "data/ecoli_processed_genes.csv"
-            if os.path.exists(reference_file):
-                ref_df = pd.read_csv(reference_file)
-                ref_sequences = ref_df['dna_sequence'].tolist()
+            # Download reference sequences from Hugging Face
+            with st.spinner("📥 Downloading E. coli reference sequences from Hugging Face..."):
+                ref_sequences = download_reference_data()
                 st.session_state['cai_weights'] = relative_adaptiveness(sequences=ref_sequences)
-                st.info(f"✅ Loaded {len(ref_sequences)} E. coli reference sequences for CAI calculation")
-            else:
-                # Fallback: minimal sequences
-                ref_sequences = [
-                    "ATGGCGAAAGCGCTGTATCGCGAAAGCGCTGTATCGCGAAAGCGCTGTATCGC",
-                    "ATGAAATTTATTTATTATTATAAATTTATTTATTATTATAAATTTATTTAT",
-                    "ATGGGTCGTCGTCGTCGTGGTCGTCGTCGTCGTGGTCGTCGTCGTCGTGGT"
-                ]
-                st.session_state['cai_weights'] = relative_adaptiveness(sequences=ref_sequences)
-                st.warning(f"⚠️ Using minimal reference sequences for E. coli")
+                if len(ref_sequences) > 100:  # If we got the full dataset
+                    st.success(f"✅ Downloaded {len(ref_sequences):,} E. coli reference sequences for CAI calculation")
+                else:
+                    st.info(f"⚠️ Using {len(ref_sequences)} minimal reference sequences (full dataset unavailable)")
         except Exception as e:
             st.error(f"Error loading E. coli reference data: {e}")
             st.session_state['cai_weights'] = {}
     # tAI weights (E. coli only)
     if 'tai_weights' not in st.session_state or st.session_state['tai_weights'] is None:
         try:
-            st.session_state['tai_weights'] = get_ecoli_tai_weights()
+            with st.spinner("📥 Downloading E. coli tAI weights from Hugging Face..."):
+                st.session_state['tai_weights'] = download_tai_weights()
+                st.success("✅ Downloaded E. coli tAI weights")
         except Exception as e:
             st.error(f"Error loading E. coli tAI weights: {e}")
             st.session_state['tai_weights'] = {}
@@ -637,6 +682,25 @@ def single_sequence_optimization():
     )
     if not POST_PROCESSING_AVAILABLE:
         st.sidebar.warning("⚠️ DNAChisel not available. Install with: pip install dnachisel")
+    
+    # Dataset Information
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("### 📊 Dataset Information")
+    st.sidebar.markdown("""
+    - **Dataset**: [ColiFormer-Data](https://huggingface.co/datasets/saketh11/ColiFormer-Data)
+    - **Training**: 4,300 high-CAI E. coli sequences
+    - **Reference**: 50,000+ E. coli gene sequences  
+    - **Auto-download**: CAI weights & tAI coefficients
+    """)
+    
+    # Model Information
+    st.sidebar.markdown("### 🤖 Model Information")
+    st.sidebar.markdown("""
+    - **Model**: [ColiFormer](https://huggingface.co/saketh11/ColiFormer)
+    - **Improvement**: +6.2% CAI vs base model
+    - **Architecture**: BigBird Transformer + ALM
+    - **Auto-download**: From Hugging Face Hub
+    """)
     col1, col2 = st.columns([1, 1])
     with col1:
         st.header("🧬 Input Sequence")

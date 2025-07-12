@@ -174,9 +174,13 @@ If you encounter issues:
 ## Technical Details
 
 ### Model Information
+- **Fine-tuned Model**: `saketh11/ColiFormer` - Enhanced with ALM training (6.2% better CAI)
+- **Training Dataset**: `saketh11/ColiFormer-Data` - 4,300 high-CAI E. coli sequences
 - **Base Model**: BigBird Transformer architecture
 - **Training Data**: Large-scale protein-DNA sequence pairs
 - **Optimization**: Multi-objective optimization for codon usage, GC content, and expression
+- **Automatic Download**: Model is automatically downloaded from Hugging Face Hub on first use
+- **Fallback**: If the fine-tuned model fails to load, falls back to base model
 
 ### Metrics Calculated
 - **GC Content**: Percentage of G and C nucleotides
